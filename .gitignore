@@ -1,0 +1,38 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.o
+*.obj
+
+# Static and Dynamic Libraries
+*.a
+*.lib
+*.so
+*.dll
+
+# Executables
+infusion_pump_tests
+*.exe
+*.out
+
+# CMake artifacts
+/build/
+/CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+
+# Test Coverage Reports
+*.gcda
+*.gcno
+*.info
+coverage_html/
+coverage_raw.info
+
+# Local AI Tool / Editor configurations
+.cursorrules
+.cursor/
+.antigravity/
+.ollama/
+.vscode/

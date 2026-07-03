@@ -3,21 +3,21 @@
  * NUCLEO-F446RE device tree overlay
  *
  * Stepper wiring (TMC2209):
- *   PB0 → STEP
- *   PB1 → DIR
- *   PB2 → EN  (active-low)
+ * PB0 → STEP
+ * PB1 → DIR
+ * PB2 → EN  (active-low)
  *
  * Quadrature encoder:
- *   TIM2 CH1 → PA0
- *   TIM2 CH2 → PA1
+ * TIM2 CH1 → PA0
+ * TIM2 CH2 → PA1
  *
  * LPS22HB pressure sensor (I²C1):
- *   PB6 → SCL
- *   PB7 → SDA
- *   I²C address: 0x5C (SA0=GND) or 0x5D (SA0=VDD)
+ * PB6 → SCL
+ * PB7 → SDA
+ * I²C address: 0x5C (SA0=GND) or 0x5D (SA0=VDD)
  *
  * LED alarm indicator:
- *   PA5 → onboard LD2
+ * PA5 → onboard LD2
  */
 
 &i2c1 {
@@ -30,6 +30,7 @@
         compatible = "st,lps22hb-press";
         reg = <0x5c>;
         label = "LPS22HB";
+        status = "okay";
     };
 };
 
@@ -56,5 +57,17 @@
             gpios = <&gpioa 5 GPIO_ACTIVE_HIGH>;
             label = "ALARM_LED";
         };
+    };
+};
+
+&timers2 {
+    status = "okay";
+    st,prescaler = <0>;
+    
+    qdec {
+        status = "okay";
+        pinctrl-0 = <&tim2_ch1_pa0 &tim2_ch2_pa1>;
+        pinctrl-names = "default";
+        st,counts-per-revolution = <2400>; /* Added required encoder resolution parameter */
     };
 };

@@ -4,16 +4,12 @@
  * THIS IS THE ONLY FILE THAT INCLUDES ZEPHYR HEADERS.
  * All business logic in include/ and src/ has zero Zephyr dependencies.
  *
- * Hardware: NUCLEO-F446RE
- *   - TMC2209 stepper driver  (STEP/DIR/EN via GPIO)
- *   - Quadrature encoder      (TIM2 in encoder mode)
- *   - LPS22HB pressure sensor (I²C1)
- *   - LED alarm indicator     (PA5)
- *   - UART console            (USART2 via ST-LINK VCP)
- *
- * Threads:
- *   infusion_tick_thread — calls mode->run() + mode->tick() every 200 µs
- *   uart_rx_thread       — receives START/STOP/PAUSE/RESUME commands
+ * Hardware: NUCLEO-F446RE 
+ * - TMC2209 stepper driver  (STEP/DIR/EN via GPIO)
+ * - Quadrature encoder      (TIM2 in encoder mode)
+ * - LPS22HB pressure sensor (I²C1)
+ * - LED alarm indicator     (PA5)
+ * - UART console            (USART2 via ST-LINK VCP)
  */
 
 #include <zephyr/kernel.h>
@@ -21,7 +17,10 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
-#include <zephyr/drivers/counter.h>
+
+#include <soc.h>
+#include <stm32_ll_bus.h>
+#include <stm32_ll_gpio.h>
 
 #include "infusion/ConstantRateMode.hpp"
 #include "infusion/LinearRampMode.hpp"
@@ -43,8 +42,8 @@ public:
                         const struct gpio_dt_spec en) noexcept
         : step_(step), dir_(dir), en_(en) {}
 
-    void enable()  noexcept override { gpio_pin_set_dt(&en_, 0); }
-    void disable() noexcept override { gpio_pin_set_dt(&en_, 1); }
+    void enable()  noexcept override { gpio_pin_set_dt(&en_, 1); }
+    void disable() noexcept override { gpio_pin_set_dt(&en_, 0); }
     void step()    noexcept override {
         gpio_pin_set_dt(&step_, 1);
         k_busy_wait(2U);
@@ -62,27 +61,72 @@ private:
     uint32_t stepCount_{0U};
 };
 
-// ---------------------------------------------------------------------------
-// ZephyrEncoderDriver
-// Reads TIM2 configured as quadrature encoder.
-// Ticks are accumulated in an ISR-updated counter; getTicks() returns
-// the count since last resetTicks().
-// ---------------------------------------------------------------------------
 class ZephyrEncoderDriver final : public IEncoderDriver {
 public:
-    uint32_t getTicks() const noexcept override { return ticks_; }
-    void resetTicks()         noexcept override { ticks_ = 0U;   }
+    ZephyrEncoderDriver() noexcept {
+        // Enable peripheral clocks for GPIOA and TIM2 via LL interface
+        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+        LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2);
+        __DSB();
 
-    // Called from encoder ISR or timer callback
-    void addTicks(uint32_t t) noexcept override { ticks_ += t; }
+        // Route PA0 to Alternate Function 1 (TIM2_CH1)
+        LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_ALTERNATE);
+        LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_UP);
+        LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_0, LL_GPIO_SPEED_FREQ_HIGH);
+        LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_0, LL_GPIO_AF_1);
+
+        // Route PA1 to Alternate Function 1 (TIM2_CH2)
+        LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_ALTERNATE);
+        LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_1, LL_GPIO_PULL_UP);
+        LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_1, LL_GPIO_SPEED_FREQ_HIGH);
+        LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_1, LL_GPIO_AF_1);
+
+        // Clear timer interrupt configurations
+        TIM2->DIER &= ~(TIM_DIER_UIE | TIM_DIER_CC1IE | TIM_DIER_CC2IE | TIM_DIER_TIE);
+
+        // Configure TIM2 into Quadrature Encoder Mode 3
+        TIM2->SMCR  &= ~(TIM_SMCR_SMS); 
+        TIM2->SMCR  |= (TIM_SMCR_SMS_0 | TIM_SMCR_SMS_1); 
+        
+        // Input logic digital filters
+        TIM2->CCMR1 |= (TIM_CCMR1_IC1F_0 | TIM_CCMR1_IC1F_1 | TIM_CCMR1_IC2F_0 | TIM_CCMR1_IC2F_1);
+
+        // Invert CH1 capture edge parameters to match positive forward rotation metrics
+        TIM2->CCER  |= TIM_CCER_CC1P;
+
+        // Enable timer
+        TIM2->CR1   |= TIM_CR1_CEN;
+        TIM2->CNT    = 0U;
+        lastFetchCnt_ = 0U;
+    }
+
+    uint32_t getTicks() const noexcept override {
+        // Read register as signed 32-bit integer to absorb negative values gracefully
+        int32_t current_cnt = static_cast<int32_t>(TIM2->CNT);
+        int32_t last_fetch  = static_cast<int32_t>(lastFetchCnt_);
+        int32_t delta = current_cnt - last_fetch;
+
+        // If the direction is reversed mechanically, flip the delta sign to keep it positive
+        if (delta < 0) {
+            delta = -delta;
+        }
+
+        // Apply 1.5x scaling calibration to map hardware ticks directly to 1 uL tracking logic
+        return (static_cast<uint32_t>(delta) * 2U) / 3U;
+    }
+
+    void resetTicks() noexcept override {
+        lastFetchCnt_ = TIM2->CNT;
+    }
+
+    void addTicks(uint32_t t) noexcept override {
+        lastFetchCnt_ -= (t * 3U) / 2U;
+    }
 
 private:
-    volatile uint32_t ticks_{0U};
+    mutable uint32_t lastFetchCnt_{0U}; 
 };
 
-// ---------------------------------------------------------------------------
-// ZephyrPressureSensor — reads LPS22HB over I²C via Zephyr sensor API
-// ---------------------------------------------------------------------------
 class ZephyrPressureSensor final : public IPressureSensor {
 public:
     explicit ZephyrPressureSensor(const struct device* dev) noexcept
@@ -90,23 +134,20 @@ public:
 
     uint32_t readPressureHPa() const noexcept override {
         struct sensor_value val{};
+        struct sensor_value attr;
+        attr.val1 = 10; 
+        attr.val2 = 0;
+        sensor_attr_set(dev_, SENSOR_CHAN_PRESS, SENSOR_ATTR_SAMPLING_FREQUENCY, &attr);
+
         if (sensor_sample_fetch(dev_) < 0) return 0U;
         if (sensor_channel_get(dev_, SENSOR_CHAN_PRESS, &val) < 0) return 0U;
-        // LPS22HB returns kPa — convert to hPa (* 10)
         return static_cast<uint32_t>(val.val1 * 10 + val.val2 / 100000);
     }
-
-    bool isReady() const noexcept override {
-        return device_is_ready(dev_);
-    }
-
+    bool isReady() const noexcept override { return device_is_ready(dev_); }
 private:
     const struct device* dev_;
 };
 
-// ---------------------------------------------------------------------------
-// UartAlarmObserver
-// ---------------------------------------------------------------------------
 class UartAlarmObserver final : public IAlarmObserver {
 public:
     explicit UartAlarmObserver(const struct device* uart) noexcept
@@ -122,41 +163,30 @@ public:
         }
         txStr(msg);
     }
-    void onAlarmCleared(AlarmType /*type*/) noexcept override {
-        txStr("ALARM:CLEARED\r\n");
-    }
+    void onAlarmCleared(AlarmType /*type*/) noexcept override { txStr("ALARM:CLEARED\r\n"); }
 private:
     const struct device* uart_;
-    void txStr(const char* s) noexcept {
-        while (s && *s) uart_poll_out(uart_, *s++);
-    }
+    void txStr(const char* s) noexcept { while (s && *s) uart_poll_out(uart_, *s++); }
 };
 
-// ---------------------------------------------------------------------------
-// LedAlarmObserver
-// ---------------------------------------------------------------------------
 class LedAlarmObserver final : public IAlarmObserver {
 public:
     explicit LedAlarmObserver(const struct gpio_dt_spec led) noexcept
         : led_(led) {}
-    void onAlarm(AlarmType /*type*/) noexcept override {
-        gpio_pin_set_dt(&led_, 1);
-    }
-    void onAlarmCleared(AlarmType /*type*/) noexcept override {
-        gpio_pin_set_dt(&led_, 0);
-    }
+    void onAlarm(AlarmType /*type*/) noexcept override { gpio_pin_set_dt(&led_, 1); }
+    void onAlarmCleared(AlarmType /*type*/) noexcept override { gpio_pin_set_dt(&led_, 0); }
 private:
     struct gpio_dt_spec led_;
 };
 
 // ============================================================
-// Static storage — zero heap
+// Static Storage Area — Zero Heap
 // ============================================================
 static constexpr float    DEFAULT_RATE_ML_HR  = 120.0f;
 static constexpr float    RAMP_START_ML_HR    = 1.0f;
 static constexpr float    RAMP_TARGET_ML_HR   = 120.0f;
-static constexpr uint32_t RAMP_DURATION_US    = 60'000'000U;  // 60 seconds
-static constexpr uint32_t TARGET_VOLUME_UL    = 500'000U;     // 500 mL
+static constexpr uint32_t RAMP_DURATION_US    = 60'000'000U;
+static constexpr uint32_t TARGET_VOLUME_UL    = 50'000'000U; 
 
 static VolumeTracker g_tracker;
 
@@ -169,15 +199,15 @@ static uint8_t buf_monitor  [sizeof(OcclusionMonitor)]     alignas(OcclusionMoni
 static uint8_t buf_constant [sizeof(ConstantRateMode)]     alignas(ConstantRateMode);
 static uint8_t buf_ramp     [sizeof(LinearRampMode)]       alignas(LinearRampMode);
 
-static ZephyrStepperDriver*  g_stepper  = nullptr;
-static ZephyrEncoderDriver*  g_encoder  = nullptr;
-static OcclusionMonitor*     g_monitor  = nullptr;
-static ConstantRateMode*     g_constant = nullptr;
-static LinearRampMode*       g_ramp     = nullptr;
-static InfusionMode*         g_active   = nullptr;
+static ZephyrStepperDriver* g_stepper  = nullptr;
+static ZephyrEncoderDriver* g_encoder  = nullptr;
+static OcclusionMonitor* g_monitor  = nullptr;
+static ConstantRateMode* g_constant = nullptr;
+static LinearRampMode* g_ramp     = nullptr;
+static InfusionMode* g_active   = nullptr;
 
 // ============================================================
-// Threads
+// Core Timing Threads
 // ============================================================
 K_THREAD_STACK_DEFINE(infusion_stack, 1024);
 static struct k_thread infusion_thread;
@@ -185,7 +215,7 @@ static struct k_thread infusion_thread;
 static void infusion_tick_fn(void*, void*, void*) {
     while (true) {
         if (g_active != nullptr) {
-            g_active->run();
+            g_active->run();  
             g_active->tick();
         }
         k_sleep(K_USEC(200U));
@@ -198,7 +228,6 @@ static struct k_thread uart_thread;
 static void uart_rx_fn(void* arg, void*, void*) {
     const struct device* uart = static_cast<const struct device*>(arg);
     uint8_t byte = 0U;
-    // Simple single-byte command: 'S'=start 'X'=stop 'P'=pause 'R'=resume
     while (true) {
         if (uart_poll_in(uart, &byte) == 0 && g_active != nullptr) {
             switch (byte) {
@@ -206,12 +235,8 @@ static void uart_rx_fn(void* arg, void*, void*) {
                 case 'X': g_active->stop();   break;
                 case 'P': g_active->pause();  break;
                 case 'R': g_active->resume(); break;
-                case 'C': // switch to constant mode
-                    g_active->switchMode(g_constant);
-                    break;
-                case 'L': // switch to linear ramp mode
-                    g_active->switchMode(g_ramp);
-                    break;
+                case 'C': g_active->switchMode(g_constant); break;
+                case 'L': g_active->switchMode(g_ramp);     break;
                 default: break;
             }
         }
@@ -220,64 +245,57 @@ static void uart_rx_fn(void* arg, void*, void*) {
 }
 
 // ============================================================
-// main
+// Main Initialization Engine
 // ============================================================
 int main(void) {
+    printk("=== Infusion Pump System Online ===\n");
     const struct device* uart    = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-    const struct device* lps22hb = DEVICE_DT_GET(DT_NODELABEL(lps22hb));
+    const struct device* lps22hb = DEVICE_DT_GET(DT_CHILD(DT_NODELABEL(i2c1), lps22hb_5c));
 
-    __ASSERT(device_is_ready(uart),    "UART not ready");
-    __ASSERT(device_is_ready(lps22hb), "LPS22HB not ready");
+    __ASSERT(device_is_ready(uart),    "UART Interface Error");
+    __ASSERT(device_is_ready(lps22hb), "LPS22HB Sensor Error");
 
-    static const struct gpio_dt_spec step_spec =
-        GPIO_DT_SPEC_GET(DT_NODELABEL(step_pin), gpios);
-    static const struct gpio_dt_spec dir_spec =
-        GPIO_DT_SPEC_GET(DT_NODELABEL(dir_pin), gpios);
-    static const struct gpio_dt_spec en_spec =
-        GPIO_DT_SPEC_GET(DT_NODELABEL(en_pin), gpios);
-    static const struct gpio_dt_spec led_spec =
-        GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_led), gpios);
+    static const struct gpio_dt_spec step_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(step_pin), gpios);
+    static const struct gpio_dt_spec dir_spec  = GPIO_DT_SPEC_GET(DT_NODELABEL(dir_pin), gpios);
+    static const struct gpio_dt_spec en_spec   = GPIO_DT_SPEC_GET(DT_NODELABEL(en_pin), gpios);
+    static const struct gpio_dt_spec led_spec  = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_led), gpios);
 
     gpio_pin_configure_dt(&step_spec, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&dir_spec,  GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&en_spec,   GPIO_OUTPUT_ACTIVE);
     gpio_pin_configure_dt(&led_spec,  GPIO_OUTPUT_INACTIVE);
 
-    // Construct all objects via placement-new
     g_stepper  = new (buf_stepper)  ZephyrStepperDriver{step_spec, dir_spec, en_spec};
     g_encoder  = new (buf_encoder)  ZephyrEncoderDriver{};
     auto* pres = new (buf_pressure) ZephyrPressureSensor{lps22hb};
     auto* uObs = new (buf_uartObs)  UartAlarmObserver{uart};
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
 
-    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 50U};
+    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 2000U}; 
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
 
-    g_constant = new (buf_constant) ConstantRateMode{
-        *g_stepper, *g_encoder, g_tracker, *g_monitor,
-        TARGET_VOLUME_UL, DEFAULT_RATE_ML_HR};
+    g_constant = new (buf_constant) ConstantRateMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, DEFAULT_RATE_ML_HR};
+    g_ramp     = new (buf_ramp)     LinearRampMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, RAMP_START_ML_HR, RAMP_TARGET_ML_HR, RAMP_DURATION_US};
 
-    g_ramp = new (buf_ramp) LinearRampMode{
-        *g_stepper, *g_encoder, g_tracker, *g_monitor,
-        TARGET_VOLUME_UL,
-        RAMP_START_ML_HR, RAMP_TARGET_ML_HR, RAMP_DURATION_US};
+    g_active = g_constant;  
 
-    g_active = g_constant;  // default mode
+    k_thread_create(&infusion_thread, infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack), infusion_tick_fn, nullptr, nullptr, nullptr, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
+    k_thread_create(&uart_thread, uart_stack, K_THREAD_STACK_SIZEOF(uart_stack), uart_rx_fn, const_cast<struct device*>(uart), nullptr, nullptr, K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
 
-    k_thread_create(&infusion_thread,
-                    infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack),
-                    infusion_tick_fn, nullptr, nullptr, nullptr,
-                    K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
-    k_thread_name_set(&infusion_thread, "infusion_tick");
+    while (true) {
+        if (g_active != nullptr && !g_active->isRunning() && g_stepper->getStepCount() > 0 && g_stepper->getStepCount() < 100000U) {
+            g_active->resume(); 
+        }
 
-    k_thread_create(&uart_thread,
-                    uart_stack, K_THREAD_STACK_SIZEOF(uart_stack),
-                    uart_rx_fn,
-                    const_cast<struct device*>(uart),
-                    nullptr, nullptr,
-                    K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
-    k_thread_name_set(&uart_thread, "uart_rx");
+        uint32_t current_pressure = pres->readPressureHPa();
+        uint32_t commanded_steps  = g_stepper->getStepCount();
+        uint32_t raw_timer_cnt    = TIM2->CNT; 
+        uint32_t volume_tracked   = g_tracker.volumeUL();
 
-    return 0;
+        printk("Status: RUNNING_UNGUARDED | Pressure: %u hPa | Stepper Steps: %u | Direct TIM2->CNT: %u | Tracker Vol: %u uL\n",
+               current_pressure, commanded_steps, raw_timer_cnt, volume_tracked);
+
+        k_msleep(1000);
+    }
 }

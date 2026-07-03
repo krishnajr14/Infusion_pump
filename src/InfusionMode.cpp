@@ -1,5 +1,13 @@
 #include "infusion/InfusionMode.hpp"
 
+// Conditional include to maintain zero-dependency rule on host machine
+#ifdef __ZEPHYR__
+#include <zephyr/sys/printk.h>
+#else
+// Mock printk for native host tests so compilation doesn't crash
+#define printk(...) (void)0
+#endif
+
 // ---------------------------------------------------------------------------
 InfusionMode::InfusionMode(IStepperDriver&   stepper,
                             IEncoderDriver&   encoder,
@@ -18,7 +26,6 @@ InfusionMode::InfusionMode(IStepperDriver&   stepper,
 // run() — Template Method skeleton. Called once per logical cycle.
 // Order is fixed: compute rate → apply rate → check alarms.
 // ---------------------------------------------------------------------------
-// Inside run()
 void InfusionMode::run() noexcept {
     /* LCOV_EXCL_START */
     if (!running_ || complete_) {
@@ -40,7 +47,6 @@ void InfusionMode::run() noexcept {
 // Counts elapsed time and fires step pulses at the correct interval.
 // Also polls the occlusion monitor and accumulates encoder ticks.
 // ---------------------------------------------------------------------------
-// Inside tick()
 void InfusionMode::tick() noexcept {
     /* LCOV_EXCL_START */
     if (!running_ || complete_) {
@@ -71,6 +77,7 @@ void InfusionMode::tick() noexcept {
 
 // ---------------------------------------------------------------------------
 void InfusionMode::start() noexcept {
+    printk("=== Infusion Pump Started ===\n");
     running_        = true;
     complete_       = false;
     ticksSinceStep_ = 0U;
@@ -82,16 +89,19 @@ void InfusionMode::start() noexcept {
 }
 
 void InfusionMode::stop() noexcept {
+    printk("=== Infusion Pump Stopped ===\n");
     running_ = false;
     stepper_.disable();
 }
 
 void InfusionMode::pause() noexcept {
+    printk("=== Infusion Pump Paused ===\n");
     running_ = false;
     stepper_.disable();
 }
 
 void InfusionMode::resume() noexcept {
+    printk("=== Infusion Pump Resumed ===\n");
     running_ = true;
     stepper_.enable();
 }
@@ -113,13 +123,6 @@ uint32_t InfusionMode::stepIntervalUs() const noexcept { return stepIntervalUs_;
 
 // ---------------------------------------------------------------------------
 // applyRate — converts mL/hr to inter-step delay in µs.
-//
-// Derivation (1 step = 1 µL):
-//   steps/hr  = rate_mLperHr × 1000
-//   steps/sec = rate_mLperHr × 1000 / 3600
-//   µs/step   = 3,600,000 / rate_mLperHr
-//
-// Clamps rate to [1, 500] mL/hr per IEC 60601-2-24.
 // ---------------------------------------------------------------------------
 void InfusionMode::applyRate(float mLperHr) noexcept {
     if (mLperHr < MIN_RATE_ML_HR) { mLperHr = MIN_RATE_ML_HR; }

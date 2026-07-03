@@ -1,0 +1,2 @@
+# Load board Kconfig descriptions.
+osource "/home/krishna-inc-5836/zephyrproject/zephyr/boards/st/nucleo_f446re/Kconfig.nucleo_f446re"

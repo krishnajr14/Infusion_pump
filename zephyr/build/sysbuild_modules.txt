@@ -1,0 +1,1 @@
+"mcuboot":"/home/krishna-inc-5836/zephyrproject/bootloader/mcuboot":"/home/krishna-inc-5836/zephyrproject/bootloader/mcuboot/boot/zephyr/sysbuild"

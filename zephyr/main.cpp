@@ -64,58 +64,58 @@ private:
 class ZephyrEncoderDriver final : public IEncoderDriver {
 public:
     ZephyrEncoderDriver() noexcept {
-        // Enable peripheral clocks for GPIOA and TIM2 via LL interface
         LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
         LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2);
         __DSB();
 
-        // Route PA0 to Alternate Function 1 (TIM2_CH1)
         LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_ALTERNATE);
         LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_UP);
         LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_0, LL_GPIO_SPEED_FREQ_HIGH);
         LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_0, LL_GPIO_AF_1);
 
-        // Route PA1 to Alternate Function 1 (TIM2_CH2)
         LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_ALTERNATE);
         LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_1, LL_GPIO_PULL_UP);
         LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_1, LL_GPIO_SPEED_FREQ_HIGH);
         LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_1, LL_GPIO_AF_1);
 
-        // Clear timer interrupt configurations
         TIM2->DIER &= ~(TIM_DIER_UIE | TIM_DIER_CC1IE | TIM_DIER_CC2IE | TIM_DIER_TIE);
 
-        // Configure TIM2 into Quadrature Encoder Mode 3
         TIM2->SMCR  &= ~(TIM_SMCR_SMS); 
         TIM2->SMCR  |= (TIM_SMCR_SMS_0 | TIM_SMCR_SMS_1); 
         
-        // Input logic digital filters
         TIM2->CCMR1 |= (TIM_CCMR1_IC1F_0 | TIM_CCMR1_IC1F_1 | TIM_CCMR1_IC2F_0 | TIM_CCMR1_IC2F_1);
 
-        // Invert CH1 capture edge parameters to match positive forward rotation metrics
+        // Keep active phase alignment
         TIM2->CCER  |= TIM_CCER_CC1P;
 
-        // Enable timer
         TIM2->CR1   |= TIM_CR1_CEN;
         TIM2->CNT    = 0U;
         lastFetchCnt_ = 0U;
     }
 
     uint32_t getTicks() const noexcept override {
-        // Read register as signed 32-bit integer to absorb negative values gracefully
-        int32_t current_cnt = static_cast<int32_t>(TIM2->CNT);
-        int32_t last_fetch  = static_cast<int32_t>(lastFetchCnt_);
-        int32_t delta = current_cnt - last_fetch;
+        uint32_t current_cnt = TIM2->CNT;
+        uint32_t delta = 0U;
 
-        // If the direction is reversed mechanically, flip the delta sign to keep it positive
-        if (delta < 0) {
-            delta = -delta;
+        // Two's complement unsigned delta subtraction safely handles 
+        // forward increments and underflow roll-overs seamlessly
+        if (current_cnt >= lastFetchCnt_) {
+            delta = current_cnt - lastFetchCnt_;
+        } else {
+            delta = (0xFFFFFFFFU - lastFetchCnt_) + current_cnt + 1U;
         }
 
-        // Apply 1.5x scaling calibration to map hardware ticks directly to 1 uL tracking logic
-        return (static_cast<uint32_t>(delta) * 2U) / 3U;
+        // Catch edge-case noise or unexpected direction reversals
+        if (delta > 2000000000U) {
+            return 0U;
+        }
+
+        // Apply 1.5x geometric ratio scale down to 1:1 volume tracking resolution
+        return (delta * 2U) / 3U;
     }
 
     void resetTicks() noexcept override {
+        // Synchronize our tracking window snapshot to preserve continuous register tracking
         lastFetchCnt_ = TIM2->CNT;
     }
 

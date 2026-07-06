@@ -31,6 +31,9 @@
 #include "infusion/hal/IPressureSensor.hpp"
 #include "infusion/hal/IAlarmObserver.hpp"
 
+#include <stdio.h>   // Required for sscanf
+#include <string.h>  // Required for strncmp, memset
+
 // ============================================================
 // Concrete HAL implementations
 // ============================================================
@@ -85,7 +88,6 @@ public:
         
         TIM2->CCMR1 |= (TIM_CCMR1_IC1F_0 | TIM_CCMR1_IC1F_1 | TIM_CCMR1_IC2F_0 | TIM_CCMR1_IC2F_1);
 
-        // Keep active phase alignment
         TIM2->CCER  |= TIM_CCER_CC1P;
 
         TIM2->CR1   |= TIM_CR1_CEN;
@@ -97,25 +99,22 @@ public:
         uint32_t current_cnt = TIM2->CNT;
         uint32_t delta = 0U;
 
-        // Two's complement unsigned delta subtraction safely handles 
-        // forward increments and underflow roll-overs seamlessly
         if (current_cnt >= lastFetchCnt_) {
             delta = current_cnt - lastFetchCnt_;
         } else {
             delta = (0xFFFFFFFFU - lastFetchCnt_) + current_cnt + 1U;
         }
 
-        // Catch edge-case noise or unexpected direction reversals
+        // Catch edge mechanical rollbacks or startup transients
         if (delta > 2000000000U) {
             return 0U;
         }
 
-        // Apply 1.5x geometric ratio scale down to 1:1 volume tracking resolution
+        // 1.5x geometric ratio scale down to 1:1 volume tracking resolution
         return (delta * 2U) / 3U;
     }
 
     void resetTicks() noexcept override {
-        // Synchronize our tracking window snapshot to preserve continuous register tracking
         lastFetchCnt_ = TIM2->CNT;
     }
 
@@ -186,7 +185,7 @@ static constexpr float    DEFAULT_RATE_ML_HR  = 120.0f;
 static constexpr float    RAMP_START_ML_HR    = 1.0f;
 static constexpr float    RAMP_TARGET_ML_HR   = 120.0f;
 static constexpr uint32_t RAMP_DURATION_US    = 60'000'000U;
-static constexpr uint32_t TARGET_VOLUME_UL    = 50'000'000U; 
+static constexpr uint32_t TARGET_VOLUME_UL    = 500'000U; 
 
 static VolumeTracker g_tracker;
 
@@ -227,17 +226,123 @@ static struct k_thread uart_thread;
 
 static void uart_rx_fn(void* arg, void*, void*) {
     const struct device* uart = static_cast<const struct device*>(arg);
+    
+    // Fixed-size stack buffer for heap-free command processing
+    static char cmd_buf[32];
+    static size_t cmd_idx = 0U;
+    
     uint8_t byte = 0U;
+
     while (true) {
         if (uart_poll_in(uart, &byte) == 0 && g_active != nullptr) {
-            switch (byte) {
-                case 'S': g_active->start();  break;
-                case 'X': g_active->stop();   break;
-                case 'P': g_active->pause();  break;
-                case 'R': g_active->resume(); break;
-                case 'C': g_active->switchMode(g_constant); break;
-                case 'L': g_active->switchMode(g_ramp);     break;
-                default: break;
+            // Echo back character immediately for a responsive user terminal experience
+            uart_poll_out(uart, byte);
+
+            // Handle Backspace (\b or DEL) to allow correcting typos in the serial console
+            if (byte == '\b' || byte == 127U) {
+                if (cmd_idx > 0U) {
+                    --cmd_idx;
+                    // Send terminal escape sequence to clear character visually
+                    uart_poll_out(uart, ' ');
+                    uart_poll_out(uart, '\b');
+                }
+                continue;
+            }
+
+            // Detect String Line Termination (\r or \n)
+            if (byte == '\r' || byte == '\n') {
+                if (cmd_idx > 0U) {
+                    cmd_buf[cmd_idx] = '\0'; // Enforce strict null-termination
+
+                    // Clear mechanical rollback offsets immediately before parsing system states
+                    g_encoder->resetTicks();
+
+                    // --------------------------------------------------------
+                    // COMMAND PARSER ENGINE
+                    // --------------------------------------------------------
+                    
+                    // 1. DYNAMIC RATE MODIFICATION: SET_RATE <val>
+                    if (strncmp(cmd_buf, "SET_RATE ", 9) == 0) {
+                        float parsed_rate = 0.0f;
+                        if (sscanf(cmd_buf + 9, "%f", &parsed_rate) == 1) {
+                            g_constant->setRate(parsed_rate);
+                            // Cast the target value to an integer to satisfy strict non-promoted compilation checks
+                            printk("\r\n>> Parameter Confirmed: Rate adjusted to %d mL/hr\r\n", static_cast<int32_t>(parsed_rate));                        } else {
+                            printk("\r\n>> Parser Error: Invalid rate format. Usage: SET_RATE <value>\r\n");
+                        }
+                    }
+                    // 2. SYSTEM CONTROL: START
+                    else if (strncmp(cmd_buf, "START", 5) == 0) {
+                        g_tracker.reset();
+                        g_stepper->resetStepCount();
+                        g_encoder->resetTicks();
+                        g_active->start();
+                        printk("\r\n>> System State: START applied safely\r\n");
+                    }
+                    // 3. SYSTEM CONTROL: STOP
+                    else if (strncmp(cmd_buf, "STOP", 4) == 0) {
+                        g_active->stop();
+                        g_encoder->resetTicks();
+                        printk("\r\n>> System State: STOP applied safely\r\n");
+                    }
+                    // 4. SYSTEM CONTROL: PAUSE
+                    else if (strncmp(cmd_buf, "PAUSE", 5) == 0) {
+                        g_active->pause();
+                        g_encoder->resetTicks();
+                        printk("\r\n>> System State: PAUSE applied safely\r\n");
+                    }
+                    // 5. SYSTEM CONTROL: RESUME
+                    else if (strncmp(cmd_buf, "RESUME", 6) == 0) {
+                        g_encoder->resetTicks();
+                        g_active->resume();
+                        g_encoder->resetTicks();
+                        printk("\r\n>> System State: RESUME applied safely\r\n");
+                    }
+                    // 6. MODE CONTROL: MODE_CONSTANT
+                    else if (strncmp(cmd_buf, "MODE_CONSTANT", 13) == 0) {
+                        if (g_active != g_constant) {
+                            g_encoder->resetTicks();
+                            g_active->switchMode(g_constant);
+                            g_active = g_constant;
+                            g_encoder->resetTicks();
+                            printk("\r\n>> Mode Changed: CONSTANT RATE ACTIVE\r\n");
+                        }
+                    }
+                    // 7. MODE CONTROL: MODE_RAMP
+                    else if (strncmp(cmd_buf, "MODE_RAMP", 9) == 0) {
+                        if (g_active != g_ramp) {
+                            g_encoder->resetTicks();
+                            g_ramp->resetRamp();
+                            g_active->switchMode(g_ramp);
+                            g_active = g_ramp;
+                            g_encoder->resetTicks();
+                            printk("\r\n>> Mode Changed: LINEAR RAMP ACTIVE\r\n");
+                        }
+                    }
+                    else {
+                        printk("\r\n>> Parser Error: Unknown Command Signature ['%s']\r\n", cmd_buf);
+                    }
+
+                    // Flush encoder boundary to protect the upcoming high-speed tick frame
+                    g_encoder->resetTicks();
+                    
+                    // Reset buffer index for next command string entry
+                    cmd_idx = 0U;
+                    printk("\r\ninfusion_pump> "); // Print line prompt
+                } else {
+                    // Empty newline typed, just print prompt newline
+                    printk("\r\ninfusion_pump> ");
+                }
+                continue;
+            }
+
+            // Append incoming character if there is space remaining in the stack segment
+            if (cmd_idx < (sizeof(cmd_buf) - 1U)) {
+                cmd_buf[cmd_idx++] = static_cast<char>(byte);
+            } else {
+                // Buffer Overflow Guard: Flush line automatically if boundary is crossed
+                cmd_idx = 0U;
+                printk("\r\n>> Parser Error: Command string too long. Buffer flushed.\r\ninfusion_pump> ");
             }
         }
         k_yield();
@@ -271,7 +376,7 @@ int main(void) {
     auto* uObs = new (buf_uartObs)  UartAlarmObserver{uart};
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
 
-    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 2000U}; 
+    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 150U}; // Restored target safety window
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
 
@@ -292,9 +397,29 @@ int main(void) {
         uint32_t commanded_steps  = g_stepper->getStepCount();
         uint32_t raw_timer_cnt    = TIM2->CNT; 
         uint32_t volume_tracked   = g_tracker.volumeUL();
+        bool     is_running       = g_active->isRunning();
+        int32_t  rate_integer     = static_cast<int32_t>(g_constant->getRate());
 
-        printk("Status: RUNNING_UNGUARDED | Pressure: %u hPa | Stepper Steps: %u | Direct TIM2->CNT: %u | Tracker Vol: %u uL\n",
-               current_pressure, commanded_steps, raw_timer_cnt, volume_tracked);
+        // Calculate Tracking Accuracy Percentage (Ideal ratio: 3 Ticks / 2 Steps = 1.5)
+        uint32_t accuracy_pct = 100U;
+        if (commanded_steps > 0U) {
+            // Expected ticks scaled up by 100 to maintain high precision integer math
+            uint32_t expected_ticks_x100 = (commanded_steps * 150U);
+            uint32_t actual_ticks_x100   = (raw_timer_cnt * 100U);
+
+            if (actual_ticks_x100 >= expected_ticks_x100) {
+                // Prevent overflowing beyond 100% if mechanical jitter adds a tiny noise edge
+                accuracy_pct = 100U;
+            } else {
+                accuracy_pct = (actual_ticks_x100 * 100U) / expected_ticks_x100;
+            }
+        } else if (raw_timer_cnt > 0U) {
+            // Jitter while stopped
+            accuracy_pct = 0U;
+        }
+
+        printk("Status: %s | Target: %d mL/hr | Pressure: %u hPa | Steps: %u | TIM2->CNT: %u | Accuracy: %u%% | Vol: %u uL\n",
+               is_running ? "RUNNING" : "STOPPED", rate_integer, current_pressure, commanded_steps, raw_timer_cnt, accuracy_pct, volume_tracked);
 
         k_msleep(1000);
     }

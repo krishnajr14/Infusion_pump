@@ -238,6 +238,7 @@ static void infusion_tick_fn(void*, void*, void*) {
             g_active->tick();
         }
         k_sleep(K_USEC(200U));
+        k_yield(); // Forces this thread to briefly release the CPU to lower priority threads
     }
 }
 
@@ -397,9 +398,15 @@ int main(void) {
 
     g_active = g_constant;  
 
-    k_thread_create(&infusion_thread, infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack), infusion_tick_fn, nullptr, nullptr, nullptr, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
-    k_thread_create(&uart_thread, uart_stack, K_THREAD_STACK_SIZEOF(uart_stack), uart_rx_fn, const_cast<struct device*>(uart), nullptr, nullptr, K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+   // Motor thread: Preemptive Priority 4 (High urgency, but lets others run during sleeps)
+    k_thread_create(&infusion_thread, infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack), 
+                    infusion_tick_fn, nullptr, nullptr, nullptr, 
+                    K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 
+    // UART thread: Preemptive Priority 6
+    k_thread_create(&uart_thread, uart_stack, K_THREAD_STACK_SIZEOF(uart_stack), 
+                    uart_rx_fn, const_cast<struct device*>(uart), nullptr, nullptr, 
+                    K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
     // VT100 Terminal Escape Sequences:
     // \033[2J = Clear entire screen completely
     // \033[H  = Move cursor to top-left home position (Line 1, Column 1)
@@ -435,23 +442,22 @@ int main(void) {
             error_pct    = 100U;
         }
 
-        // OPTIMIZED IN-PLACE REPAINT MECHANISM
-        // \033[H  = Jump cursor back to Line 1, Column 1 instantly without moving the scroll buffer
-        printk("\033[H");
-        printk("=============================================================\033[K\r\n");
-        printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \033[K\r\n");
-        printk("=============================================================\033[K\r\n\n");
-        printk("[System Status] : %s\033[K\r\n", is_running ? "RUNNING" : "STOPPED");
-        printk("[Target Rate]   : %d mL/hr\033[K\r\n", rate_integer);
-        printk("[Coil Pressure] : %u hPa\033[K\r\n", current_pressure);
-        printk("[Stepper Steps] : %u\033[K\r\n", commanded_steps);
-        printk("[TIM2 Encoder]  : %u\033[K\r\n", relative_encoder_cnt);
-        printk("[Missed Steps]  : %u (Err: %u%%)\033[K\r\n", missed_steps, error_pct);
-        printk("[Total Volume]  : %u uL\033[K\r\n", volume_tracked);
-        printk("-------------------------------------------------------------\033[K\r\n");
+        // SEQUENTIAL SCROLLING DASHBOARD PRINT
+        // No screen-wiping codes are used here, allowing it to print "next to next"
+        printk("\r\n=============================================================\r\n");
+        printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \r\n");
+        printk("=============================================================\r\n");
+        printk("[System Status] : %s\r\n", is_running ? "RUNNING" : "STOPPED");
+        printk("[Target Rate]   : %d mL/hr\r\n", rate_integer);
+        printk("[Coil Pressure] : %u hPa\r\n", current_pressure);
+        printk("[Stepper Steps] : %u\r\n", commanded_steps);
+        printk("[TIM2 Encoder]  : %u\r\n", relative_encoder_cnt);
+        printk("[Missed Steps]  : %u (Err: %u%%)\r\n", missed_steps, error_pct);
+        printk("[Total Volume]  : %u uL\r\n", volume_tracked);
+        printk("-------------------------------------------------------------\r\n");
         
-        // Print the persistent input stream safely
-        printk("infusion_pump> %s\033[K", g_cmd_buf);
+        // Print the persistent input stream safely at the new bottom edge
+        printk("infusion_pump> %s", g_cmd_buf);
 
         k_msleep(1000);
     }

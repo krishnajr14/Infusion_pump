@@ -86,19 +86,18 @@ public:
         LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_1, LL_GPIO_AF_1);
 
         TIM2->DIER &= ~(TIM_DIER_UIE | TIM_DIER_CC1IE | TIM_DIER_CC2IE | TIM_DIER_TIE);
-
         TIM2->SMCR  &= ~(TIM_SMCR_SMS); 
         TIM2->SMCR  |= (TIM_SMCR_SMS_0 | TIM_SMCR_SMS_1); 
-        
         TIM2->CCMR1 |= (TIM_CCMR1_IC1F_0 | TIM_CCMR1_IC1F_1 | TIM_CCMR1_IC2F_0 | TIM_CCMR1_IC2F_1);
-
         TIM2->CCER  |= TIM_CCER_CC1P;
 
         TIM2->CR1   |= TIM_CR1_CEN;
         TIM2->CNT    = 0U;
         lastFetchCnt_ = 0U;
+        dashboardOffset_ = 0U;
     }
 
+    // Direct restoration of your original, working calculation logic
     uint32_t getTicks() const noexcept override {
         uint32_t current_cnt = TIM2->CNT;
         uint32_t delta = 0U;
@@ -124,8 +123,24 @@ public:
         lastFetchCnt_ -= (t * 3U) / 2U;
     }
 
+    // NEW METHODS FOR THE TELEMETRY DISPLAY:
+    void resetDashboardCounter() noexcept {
+        dashboardOffset_ = TIM2->CNT;
+    }
+
+    uint32_t getDashboardCount() const noexcept {
+        uint32_t current_cnt = TIM2->CNT;
+        if (current_cnt >= dashboardOffset_) {
+            return current_cnt - dashboardOffset_;
+        } else {
+            // Handle timer overflow roll-over safely
+            return (0xFFFFFFFFU - dashboardOffset_) + current_cnt + 1U;
+        }
+    }
+
 private:
     mutable uint32_t lastFetchCnt_{0U}; 
+    uint32_t dashboardOffset_{0U}; // Dedicated offset for display tracking
 };
 
 class ZephyrPressureSensor final : public IPressureSensor {
@@ -207,6 +222,9 @@ static ConstantRateMode* g_constant = nullptr;
 static LinearRampMode* g_ramp     = nullptr;
 static InfusionMode* g_active   = nullptr;
 
+static char   g_cmd_buf[32] = {0};
+static size_t g_cmd_idx     = 0U;
+
 // ============================================================
 // Core Timing Threads
 // ============================================================
@@ -229,8 +247,6 @@ static struct k_thread uart_thread;
 static void uart_rx_fn(void* arg, void*, void*) {
     const struct device* uart = static_cast<const struct device*>(arg);
     
-    static char cmd_buf[32];
-    static size_t cmd_idx = 0U;
     uint8_t byte = 0U;
 
     while (true) {
@@ -238,15 +254,15 @@ static void uart_rx_fn(void* arg, void*, void*) {
             
             // 1. Handle Line Termination Immediately (\r or \n)
             if (byte == '\r' || byte == '\n') {
-                if (cmd_idx > 0U) {
-                    cmd_buf[cmd_idx] = '\0'; 
+                if (g_cmd_idx > 0U) {
+                    g_cmd_buf[g_cmd_idx] = '\0'; 
 
                     g_encoder->resetTicks();
 
                     // 1. DYNAMIC RATE MODIFICATION: SET_RATE <val>
-                    if (strncmp(cmd_buf, "SET_RATE ", 9) == 0) {
+                    if (strncmp(g_cmd_buf, "SET_RATE ", 9) == 0) {
                         int32_t parsed_rate_int = 0;
-                        if (sscanf(cmd_buf + 9, "%d", &parsed_rate_int) == 1) {
+                        if (sscanf(g_cmd_buf + 9, "%d", &parsed_rate_int) == 1) {
                             if (parsed_rate_int >= 1 && parsed_rate_int <= 1200) {
                                 g_constant->setRate(static_cast<float>(parsed_rate_int));
                                 printk("\r\n>> Parameter Confirmed: Rate adjusted to %d mL/hr\r\n", parsed_rate_int);
@@ -258,7 +274,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                         }
                     }
                     // 2. MODE CONTROL: MODE_CONSTANT
-                    else if (strncmp(cmd_buf, "MODE_CONSTANT", 13) == 0) {
+                    else if (strncmp(g_cmd_buf, "MODE_CONSTANT", 13) == 0) {
                         if (g_active != g_constant) {
                             g_active->switchMode(g_constant);
                             g_active = g_constant;
@@ -266,7 +282,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                         }
                     }
                     // 3. MODE CONTROL: MODE_RAMP
-                    else if (strncmp(cmd_buf, "MODE_RAMP", 9) == 0) {
+                    else if (strncmp(g_cmd_buf, "MODE_RAMP", 9) == 0) {
                         if (g_active != g_ramp) {
                             g_encoder->resetTicks();
                             g_ramp->resetRamp();
@@ -277,38 +293,40 @@ static void uart_rx_fn(void* arg, void*, void*) {
                         }
                     }
                     // 4. SYSTEM CONTROL: START
-                    else if (strncmp(cmd_buf, "START", 5) == 0) {
+                    else if (strncmp(g_cmd_buf, "START", 5) == 0) {
                         g_tracker.reset();
                         g_stepper->resetStepCount();
                         g_encoder->resetTicks();
+                        g_encoder->resetDashboardCounter(); // Reset dashboard display
                         g_active->start();
                         printk("\r\n>> System State: START applied safely\r\n");
                     }
                     // 5. SYSTEM CONTROL: STOP
-                    else if (strncmp(cmd_buf, "STOP", 4) == 0) {
+                    else if (strncmp(g_cmd_buf, "STOP", 4) == 0) {
                         g_active->stop();
                         g_encoder->resetTicks();
+                        g_encoder->resetDashboardCounter(); // Reset dashboard display
                         printk("\r\n>> System State: STOP applied safely\r\n");
                     }
                     // 6. SYSTEM CONTROL: PAUSE
-                    else if (strncmp(cmd_buf, "PAUSE", 5) == 0) {
+                    else if (strncmp(g_cmd_buf, "PAUSE", 5) == 0) {
                         g_active->pause();
                         g_encoder->resetTicks();
                         printk("\r\n>> System State: PAUSE applied safely\r\n");
                     }
                     // 7. SYSTEM CONTROL: RESUME
-                    else if (strncmp(cmd_buf, "RESUME", 6) == 0) {
+                    else if (strncmp(g_cmd_buf, "RESUME", 6) == 0) {
                         g_encoder->resetTicks();
                         g_active->resume();
                         g_encoder->resetTicks();
                         printk("\r\n>> System State: RESUME applied safely\r\n");
                     }
                     else {
-                        printk("\r\n>> Parser Error: Unknown Command Signature ['%s']\r\n", cmd_buf);
+                        printk("\r\n>> Parser Error: Unknown Command Signature ['%s']\r\n", g_cmd_buf);
                     }
 
                     g_encoder->resetTicks();
-                    cmd_idx = 0U; 
+                    g_cmd_idx = 0U; 
                     printk("\r\ninfusion_pump> "); 
                 }
                 continue; 
@@ -319,8 +337,8 @@ static void uart_rx_fn(void* arg, void*, void*) {
             }
 
             if (byte == '\b' || byte == 127U) {
-                if (cmd_idx > 0U) {
-                    --cmd_idx;
+                if (g_cmd_idx > 0U) {
+                    --g_cmd_idx;
                     uart_poll_out(uart, '\b');
                     uart_poll_out(uart, ' ');
                     uart_poll_out(uart, '\b');
@@ -329,10 +347,10 @@ static void uart_rx_fn(void* arg, void*, void*) {
             }
 
             if (byte >= 32U && byte <= 126U) {
-                if (cmd_idx < (sizeof(cmd_buf) - 1U)) {
-                    cmd_buf[cmd_idx++] = static_cast<char>(byte);
+                if (g_cmd_idx < (sizeof(g_cmd_buf) - 1U)) {
+                    g_cmd_buf[g_cmd_idx++] = static_cast<char>(byte);
                 } else {
-                    cmd_idx = 0U;
+                    g_cmd_idx = 0U;
                     printk("\r\n>> Parser Error: Buffer Overflow. Flushed.\r\ninfusion_pump> ");
                 }
             }
@@ -393,43 +411,47 @@ int main(void) {
     while (true) {
         uint32_t current_pressure = pres->readPressureHPa();
         uint32_t commanded_steps  = g_stepper->getStepCount();
-        uint32_t raw_timer_cnt    = TIM2->CNT; 
         uint32_t volume_tracked   = g_tracker.volumeUL();
         bool     is_running       = g_active->isRunning();
         int32_t  rate_integer     = static_cast<int32_t>(g_constant->getRate());
 
-        // Calculate Tracking Accuracy Percentage safely
-        uint32_t accuracy_pct = 100U;
+        // Scale raw hardware counts to matching step units (1:1 with stepper)
+        uint32_t relative_encoder_cnt = (g_encoder->getDashboardCount() * 2U) / 3U; 
+
+        // Calculate Tracking Error and Missed Steps safely
+        uint32_t error_pct    = 0U;
+        uint32_t missed_steps = 0U;
+
         if (commanded_steps > 0U) {
-            uint32_t expected_ticks_x100 = (commanded_steps * 150U);
-            uint32_t actual_ticks_x100   = (raw_timer_cnt * 100U);
-            if (actual_ticks_x100 >= expected_ticks_x100) {
-                accuracy_pct = 100U;
-            } else {
-                accuracy_pct = (actual_ticks_x100 * 100U) / expected_ticks_x100;
+            if (commanded_steps > relative_encoder_cnt) {
+                missed_steps = commanded_steps - relative_encoder_cnt;
+                error_pct    = (missed_steps * 100U) / commanded_steps;
+            } else if (relative_encoder_cnt > commanded_steps) {
+                missed_steps = relative_encoder_cnt - commanded_steps;
+                error_pct    = (missed_steps * 100U) / commanded_steps;
             }
-        } else if (raw_timer_cnt > 0U) {
-            accuracy_pct = 0U;
+        } else if (relative_encoder_cnt > 0U) {
+            missed_steps = relative_encoder_cnt;
+            error_pct    = 100U;
         }
 
-        // Update the top telemetry table without breaking user typing below
-        // Added the matching arguments at the bottom of the format string block
-        printk("\033[s"
-               "\033[4;1H[System Status] : %s\033[K\r\n"
-               "[Target Rate]   : %d mL/hr\033[K\r\n"
-               "[Coil Pressure] : %u hPa\033[K\r\n"
-               "[Stepper Steps] : %u\033[K\r\n"
-               "[TIM2 Encoder]  : %u (Acc: %u%%)\033[K\r\n"
-               "[Total Volume]  : %u uL\033[K\r\n"
-               "-------------------------------------------------------------\r\n"
-               "infusion_pump> \033[u",
-               is_running ? "RUNNING" : "STOPPED", 
-               rate_integer, 
-               current_pressure, 
-               commanded_steps, 
-               raw_timer_cnt, 
-               accuracy_pct, 
-               volume_tracked);
+        // OPTIMIZED IN-PLACE REPAINT MECHANISM
+        // \033[H  = Jump cursor back to Line 1, Column 1 instantly without moving the scroll buffer
+        printk("\033[H");
+        printk("=============================================================\033[K\r\n");
+        printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \033[K\r\n");
+        printk("=============================================================\033[K\r\n\n");
+        printk("[System Status] : %s\033[K\r\n", is_running ? "RUNNING" : "STOPPED");
+        printk("[Target Rate]   : %d mL/hr\033[K\r\n", rate_integer);
+        printk("[Coil Pressure] : %u hPa\033[K\r\n", current_pressure);
+        printk("[Stepper Steps] : %u\033[K\r\n", commanded_steps);
+        printk("[TIM2 Encoder]  : %u\033[K\r\n", relative_encoder_cnt);
+        printk("[Missed Steps]  : %u (Err: %u%%)\033[K\r\n", missed_steps, error_pct);
+        printk("[Total Volume]  : %u uL\033[K\r\n", volume_tracked);
+        printk("-------------------------------------------------------------\033[K\r\n");
+        
+        // Print the persistent input stream safely
+        printk("infusion_pump> %s\033[K", g_cmd_buf);
 
         k_msleep(1000);
     }

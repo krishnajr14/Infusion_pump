@@ -97,7 +97,6 @@ public:
         dashboardOffset_ = 0U;
     }
 
-    // Direct restoration of your original, working calculation logic
     uint32_t getTicks() const noexcept override {
         uint32_t current_cnt = TIM2->CNT;
         uint32_t delta = 0U;
@@ -123,7 +122,6 @@ public:
         lastFetchCnt_ -= (t * 3U) / 2U;
     }
 
-    // NEW METHODS FOR THE TELEMETRY DISPLAY:
     void resetDashboardCounter() noexcept {
         dashboardOffset_ = TIM2->CNT;
     }
@@ -133,14 +131,13 @@ public:
         if (current_cnt >= dashboardOffset_) {
             return current_cnt - dashboardOffset_;
         } else {
-            // Handle timer overflow roll-over safely
             return (0xFFFFFFFFU - dashboardOffset_) + current_cnt + 1U;
         }
     }
 
 private:
     mutable uint32_t lastFetchCnt_{0U}; 
-    uint32_t dashboardOffset_{0U}; // Dedicated offset for display tracking
+    uint32_t dashboardOffset_{0U}; 
 };
 
 class ZephyrPressureSensor final : public IPressureSensor {
@@ -231,14 +228,26 @@ static size_t g_cmd_idx     = 0U;
 K_THREAD_STACK_DEFINE(infusion_stack, 1024);
 static struct k_thread infusion_thread;
 
+// Precise High-Frequency Core Microsecond Clock (Ticks Motor Only)
 static void infusion_tick_fn(void*, void*, void*) {
     while (true) {
         if (g_active != nullptr) {
-            g_active->run();  
             g_active->tick();
         }
         k_sleep(K_USEC(200U));
-        k_yield(); // Forces this thread to briefly release the CPU to lower priority threads
+    }
+}
+
+K_THREAD_STACK_DEFINE(infusion_run_stack, 1024);
+static struct k_thread infusion_run_thread;
+
+// Safe Async Structural Logic Loop (Computes Volume/Alarms/State)
+static void infusion_run_fn(void*, void*, void*) {
+    while (true) {
+        if (g_active != nullptr) {
+            g_active->run();
+        }
+        k_msleep(20); 
     }
 }
 
@@ -247,20 +256,18 @@ static struct k_thread uart_thread;
 
 static void uart_rx_fn(void* arg, void*, void*) {
     const struct device* uart = static_cast<const struct device*>(arg);
-    
     uint8_t byte = 0U;
 
     while (true) {
         if (uart_poll_in(uart, &byte) == 0 && g_active != nullptr) {
             
-            // 1. Handle Line Termination Immediately (\r or \n)
             if (byte == '\r' || byte == '\n') {
                 if (g_cmd_idx > 0U) {
                     g_cmd_buf[g_cmd_idx] = '\0'; 
 
                     g_encoder->resetTicks();
 
-                    // 1. DYNAMIC RATE MODIFICATION: SET_RATE <val>
+                    // 1. DYNAMIC RATE MODIFICATION
                     if (strncmp(g_cmd_buf, "SET_RATE ", 9) == 0) {
                         int32_t parsed_rate_int = 0;
                         if (sscanf(g_cmd_buf + 9, "%d", &parsed_rate_int) == 1) {
@@ -274,7 +281,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                             printk("\r\n>> Parser Error: Invalid rate format. Usage: SET_RATE <integer>\r\n");
                         }
                     }
-                    // 2. MODE CONTROL: MODE_CONSTANT
+                    // 2. MODE CONTROL: CONSTANT
                     else if (strncmp(g_cmd_buf, "MODE_CONSTANT", 13) == 0) {
                         if (g_active != g_constant) {
                             g_active->switchMode(g_constant);
@@ -282,7 +289,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                             printk("\r\n>> Mode Changed: CONSTANT RATE ACTIVE\r\n");
                         }
                     }
-                    // 3. MODE CONTROL: MODE_RAMP
+                    // 3. MODE CONTROL: RAMP
                     else if (strncmp(g_cmd_buf, "MODE_RAMP", 9) == 0) {
                         if (g_active != g_ramp) {
                             g_encoder->resetTicks();
@@ -298,7 +305,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                         g_tracker.reset();
                         g_stepper->resetStepCount();
                         g_encoder->resetTicks();
-                        g_encoder->resetDashboardCounter(); // Reset dashboard display
+                        g_encoder->resetDashboardCounter(); 
                         g_active->start();
                         printk("\r\n>> System State: START applied safely\r\n");
                     }
@@ -306,7 +313,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                     else if (strncmp(g_cmd_buf, "STOP", 4) == 0) {
                         g_active->stop();
                         g_encoder->resetTicks();
-                        g_encoder->resetDashboardCounter(); // Reset dashboard display
+                        g_encoder->resetDashboardCounter(); 
                         printk("\r\n>> System State: STOP applied safely\r\n");
                     }
                     // 6. SYSTEM CONTROL: PAUSE
@@ -328,6 +335,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
 
                     g_encoder->resetTicks();
                     g_cmd_idx = 0U; 
+                    memset(g_cmd_buf, 0, sizeof(g_cmd_buf));
                     printk("\r\ninfusion_pump> "); 
                 }
                 continue; 
@@ -340,6 +348,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
             if (byte == '\b' || byte == 127U) {
                 if (g_cmd_idx > 0U) {
                     --g_cmd_idx;
+                    g_cmd_buf[g_cmd_idx] = '\0';
                     uart_poll_out(uart, '\b');
                     uart_poll_out(uart, ' ');
                     uart_poll_out(uart, '\b');
@@ -352,6 +361,7 @@ static void uart_rx_fn(void* arg, void*, void*) {
                     g_cmd_buf[g_cmd_idx++] = static_cast<char>(byte);
                 } else {
                     g_cmd_idx = 0U;
+                    memset(g_cmd_buf, 0, sizeof(g_cmd_buf));
                     printk("\r\n>> Parser Error: Buffer Overflow. Flushed.\r\ninfusion_pump> ");
                 }
             }
@@ -378,8 +388,6 @@ int main(void) {
 
     gpio_pin_configure_dt(&step_spec, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&dir_spec,  GPIO_OUTPUT_INACTIVE);
-    
-    // Boot in Inactive status (Active-Low logic dictates High = Driver Disabled)
     gpio_pin_configure_dt(&en_spec,   GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&led_spec,  GPIO_OUTPUT_INACTIVE);
 
@@ -398,18 +406,21 @@ int main(void) {
 
     g_active = g_constant;  
 
-   // Motor thread: Preemptive Priority 4 (High urgency, but lets others run during sleeps)
+    // Core Motor Real-Time Tick Interrupter (Priority 3)
     k_thread_create(&infusion_thread, infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack), 
                     infusion_tick_fn, nullptr, nullptr, nullptr, 
-                    K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
+                    K_PRIO_PREEMPT(3), 0, K_NO_WAIT);
 
-    // UART thread: Preemptive Priority 6
+    // Business Logic Engine (Priority 5)
+    k_thread_create(&infusion_run_thread, infusion_run_stack, K_THREAD_STACK_SIZEOF(infusion_run_stack), 
+                    infusion_run_fn, nullptr, nullptr, nullptr, 
+                    K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
+
+    // Shell CLI Input Monitor (Priority 7)
     k_thread_create(&uart_thread, uart_stack, K_THREAD_STACK_SIZEOF(uart_stack), 
                     uart_rx_fn, const_cast<struct device*>(uart), nullptr, nullptr, 
-                    K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
-    // VT100 Terminal Escape Sequences:
-    // \033[2J = Clear entire screen completely
-    // \033[H  = Move cursor to top-left home position (Line 1, Column 1)
+                    K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+
     printk("\033[2J\033[H");
     printk("=============================================================\r\n");
     printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \r\n");
@@ -442,8 +453,7 @@ int main(void) {
             error_pct    = 100U;
         }
 
-        // SEQUENTIAL SCROLLING DASHBOARD PRINT
-        // No screen-wiping codes are used here, allowing it to print "next to next"
+        // Sequential scrolling monitor output stream frame
         printk("\r\n=============================================================\r\n");
         printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \r\n");
         printk("=============================================================\r\n");
@@ -456,7 +466,6 @@ int main(void) {
         printk("[Total Volume]  : %u uL\r\n", volume_tracked);
         printk("-------------------------------------------------------------\r\n");
         
-        // Print the persistent input stream safely at the new bottom edge
         printk("infusion_pump> %s", g_cmd_buf);
 
         k_msleep(1000);

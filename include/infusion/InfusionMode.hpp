@@ -85,6 +85,9 @@ private:
     uint32_t targetVolumeUL_;
     uint32_t stepIntervalUs_{0U};
     uint32_t ticksSinceStep_{0U};
+    uint16_t pollDivider_{0U};
+    static constexpr uint16_t POLL_EVERY_N_TICKS = 50U; // 100us tick * 2 * 50 = 10ms cadence
+
 
     bool running_{false};
     bool complete_{false};

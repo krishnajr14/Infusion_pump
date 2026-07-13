@@ -71,6 +71,11 @@ void InfusionMode::tick() noexcept {
         }
     }
 
+    if (++pollDivider_ >= POLL_EVERY_N_TICKS) {
+        pollDivider_ = 0U;
+        monitor_.poll();
+    }
+
     // Update ramp progress for LinearRampMode
     activeMode_->advanceTime(TICK_US);
 }
@@ -125,9 +130,12 @@ uint32_t InfusionMode::stepIntervalUs() const noexcept { return stepIntervalUs_;
 // applyRate — converts mL/hr to inter-step delay in µs.
 // ---------------------------------------------------------------------------
 void InfusionMode::applyRate(float mLperHr) noexcept {
+    if (mLperHr <= 0.0f) {
+        stepIntervalUs_ = 0U;   // true 0 Hz, bypasses MIN_RATE floor
+        return;
+    }
     if (mLperHr < MIN_RATE_ML_HR) { mLperHr = MIN_RATE_ML_HR; }
     if (mLperHr > MAX_RATE_ML_HR) { mLperHr = MAX_RATE_ML_HR; }
-
     stepIntervalUs_ = static_cast<uint32_t>(3'600'000.0f / mLperHr);
 }
 

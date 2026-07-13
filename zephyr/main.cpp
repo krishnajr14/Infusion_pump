@@ -8,7 +8,8 @@
  * - TMC2209 stepper driver  (STEP/DIR/EN via GPIO)
  * - Quadrature encoder      (TIM2 in encoder mode)
  * - LPS22HB pressure sensor (I²C1)
- * - LED alarm indicator     (PA5)
+ * - Separate Alarm LED      (PC7)
+ * - Alarm Buzzer            (PC6)
  * - UART console            (USART2 via ST-LINK VCP)
  */
 
@@ -33,6 +34,7 @@
 
 #include <stdio.h>   // Required for sscanf
 #include <string.h>  // Required for strncmp, memset
+#include <new>       // Required for placement new
 
 // ============================================================
 // Concrete HAL implementations
@@ -45,10 +47,7 @@ public:
                         const struct gpio_dt_spec en) noexcept
         : step_(step), dir_(dir), en_(en) {}
 
-    // TMC2209 EN Pin is Active-Low: 0 turns the coil outputs ON
     void enable()  noexcept override { gpio_pin_set_dt(&en_, 1); }
-    
-    // 1 cuts off current to the coils completely, stopping the motor instantly
     void disable() noexcept override { gpio_pin_set_dt(&en_, 0); }
     
     void step()    noexcept override {
@@ -192,13 +191,24 @@ private:
     struct gpio_dt_spec led_;
 };
 
+// PROFESSIONAL ADDITION: Independent Buzzer Alarm Observer Module
+class BuzzerAlarmObserver final : public IAlarmObserver {
+public:
+    explicit BuzzerAlarmObserver(const struct gpio_dt_spec buzzer) noexcept
+        : buzzer_(buzzer) {}
+    void onAlarm(AlarmType /*type*/) noexcept override { gpio_pin_set_dt(&buzzer_, 1); }
+    void onAlarmCleared(AlarmType /*type*/) noexcept override { gpio_pin_set_dt(&buzzer_, 0); }
+private:
+    struct gpio_dt_spec buzzer_;
+};
+
 // ============================================================
 // Static Storage Area — Zero Heap
 // ============================================================
 static constexpr float    DEFAULT_RATE_ML_HR  = 120.0f;
-static constexpr float    RAMP_START_ML_HR    = 1.0f;
+static constexpr float    RAMP_START_ML_HR    = 0.0f;
 static constexpr float    RAMP_TARGET_ML_HR   = 120.0f;
-static constexpr uint32_t RAMP_DURATION_US    = 60'000'000U;
+static constexpr uint32_t RAMP_DURATION_US    = 3'600'000'000U;
 static constexpr uint32_t TARGET_VOLUME_UL    = 500'000U; 
 
 static VolumeTracker g_tracker;
@@ -208,6 +218,7 @@ static uint8_t buf_encoder  [sizeof(ZephyrEncoderDriver)]  alignas(ZephyrEncoder
 static uint8_t buf_pressure [sizeof(ZephyrPressureSensor)] alignas(ZephyrPressureSensor);
 static uint8_t buf_uartObs  [sizeof(UartAlarmObserver)]    alignas(UartAlarmObserver);
 static uint8_t buf_ledObs   [sizeof(LedAlarmObserver)]     alignas(LedAlarmObserver);
+static uint8_t buf_buzzerObs[sizeof(BuzzerAlarmObserver)]  alignas(BuzzerAlarmObserver); // Added buffer allocation
 static uint8_t buf_monitor  [sizeof(OcclusionMonitor)]     alignas(OcclusionMonitor);
 static uint8_t buf_constant [sizeof(ConstantRateMode)]     alignas(ConstantRateMode);
 static uint8_t buf_ramp     [sizeof(LinearRampMode)]       alignas(LinearRampMode);
@@ -228,20 +239,17 @@ static size_t g_cmd_idx     = 0U;
 K_THREAD_STACK_DEFINE(infusion_stack, 1024);
 static struct k_thread infusion_thread;
 
-// Precise High-Frequency Core Microsecond Clock (Ticks Motor Only)
-static void infusion_tick_fn(void*, void*, void*) {
-    while (true) {
-        if (g_active != nullptr) {
-            g_active->tick();
-        }
-        k_sleep(K_USEC(200U));
+static struct k_timer tick_timer;
+
+static void tick_timer_handler(struct k_timer*) {
+    if (g_active != nullptr) {
+        g_active->tick();
     }
 }
 
 K_THREAD_STACK_DEFINE(infusion_run_stack, 1024);
 static struct k_thread infusion_run_thread;
 
-// Safe Async Structural Logic Loop (Computes Volume/Alarms/State)
 static void infusion_run_fn(void*, void*, void*) {
     while (true) {
         if (g_active != nullptr) {
@@ -267,7 +275,6 @@ static void uart_rx_fn(void* arg, void*, void*) {
 
                     g_encoder->resetTicks();
 
-                    // 1. DYNAMIC RATE MODIFICATION
                     if (strncmp(g_cmd_buf, "SET_RATE ", 9) == 0) {
                         int32_t parsed_rate_int = 0;
                         if (sscanf(g_cmd_buf + 9, "%d", &parsed_rate_int) == 1) {
@@ -281,7 +288,6 @@ static void uart_rx_fn(void* arg, void*, void*) {
                             printk("\r\n>> Parser Error: Invalid rate format. Usage: SET_RATE <integer>\r\n");
                         }
                     }
-                    // 2. MODE CONTROL: CONSTANT
                     else if (strncmp(g_cmd_buf, "MODE_CONSTANT", 13) == 0) {
                         if (g_active != g_constant) {
                             g_active->switchMode(g_constant);
@@ -289,7 +295,6 @@ static void uart_rx_fn(void* arg, void*, void*) {
                             printk("\r\n>> Mode Changed: CONSTANT RATE ACTIVE\r\n");
                         }
                     }
-                    // 3. MODE CONTROL: RAMP
                     else if (strncmp(g_cmd_buf, "MODE_RAMP", 9) == 0) {
                         if (g_active != g_ramp) {
                             g_encoder->resetTicks();
@@ -300,8 +305,8 @@ static void uart_rx_fn(void* arg, void*, void*) {
                             printk("\r\n>> Mode Changed: LINEAR RAMP ACTIVE\r\n");
                         }
                     }
-                    // 4. SYSTEM CONTROL: START
                     else if (strncmp(g_cmd_buf, "START", 5) == 0) {
+                         if (g_active == g_ramp) { g_ramp->resetRamp(); }
                         g_tracker.reset();
                         g_stepper->resetStepCount();
                         g_encoder->resetTicks();
@@ -309,20 +314,17 @@ static void uart_rx_fn(void* arg, void*, void*) {
                         g_active->start();
                         printk("\r\n>> System State: START applied safely\r\n");
                     }
-                    // 5. SYSTEM CONTROL: STOP
                     else if (strncmp(g_cmd_buf, "STOP", 4) == 0) {
                         g_active->stop();
                         g_encoder->resetTicks();
                         g_encoder->resetDashboardCounter(); 
                         printk("\r\n>> System State: STOP applied safely\r\n");
                     }
-                    // 6. SYSTEM CONTROL: PAUSE
                     else if (strncmp(g_cmd_buf, "PAUSE", 5) == 0) {
                         g_active->pause();
                         g_encoder->resetTicks();
                         printk("\r\n>> System State: PAUSE applied safely\r\n");
                     }
-                    // 7. SYSTEM CONTROL: RESUME
                     else if (strncmp(g_cmd_buf, "RESUME", 6) == 0) {
                         g_encoder->resetTicks();
                         g_active->resume();
@@ -381,25 +383,29 @@ int main(void) {
     __ASSERT(device_is_ready(uart),    "UART Interface Error");
     __ASSERT(device_is_ready(lps22hb), "LPS22HB Sensor Error");
 
-    static const struct gpio_dt_spec step_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(step_pin), gpios);
-    static const struct gpio_dt_spec dir_spec  = GPIO_DT_SPEC_GET(DT_NODELABEL(dir_pin), gpios);
-    static const struct gpio_dt_spec en_spec   = GPIO_DT_SPEC_GET(DT_NODELABEL(en_pin), gpios);
-    static const struct gpio_dt_spec led_spec  = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_led), gpios);
+    static const struct gpio_dt_spec step_spec   = GPIO_DT_SPEC_GET(DT_NODELABEL(step_pin), gpios);
+    static const struct gpio_dt_spec dir_spec    = GPIO_DT_SPEC_GET(DT_NODELABEL(dir_pin), gpios);
+    static const struct gpio_dt_spec en_spec     = GPIO_DT_SPEC_GET(DT_NODELABEL(en_pin), gpios);
+    static const struct gpio_dt_spec led_spec    = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_led), gpios);
+    static const struct gpio_dt_spec buzzer_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_buzzer), gpios); // Added Buzzer spec
 
-    gpio_pin_configure_dt(&step_spec, GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&dir_spec,  GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&en_spec,   GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&led_spec,  GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&step_spec,   GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&dir_spec,    GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&en_spec,     GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&led_spec,    GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&buzzer_spec, GPIO_OUTPUT_INACTIVE); // Configured Buzzer pin
 
     g_stepper  = new (buf_stepper)  ZephyrStepperDriver{step_spec, dir_spec, en_spec};
     g_encoder  = new (buf_encoder)  ZephyrEncoderDriver{};
     auto* pres = new (buf_pressure) ZephyrPressureSensor{lps22hb};
     auto* uObs = new (buf_uartObs)  UartAlarmObserver{uart};
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
+    auto* bObs = new (buf_buzzerObs) BuzzerAlarmObserver{buzzer_spec}; // Instantiated Buzzer Observer
 
     g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 150U}; 
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
+    g_monitor->registerObserver(bObs); // Registered Buzzer to the notification list
 
     g_constant = new (buf_constant) ConstantRateMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, DEFAULT_RATE_ML_HR};
     g_ramp     = new (buf_ramp)     LinearRampMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, RAMP_START_ML_HR, RAMP_TARGET_ML_HR, RAMP_DURATION_US};
@@ -407,9 +413,8 @@ int main(void) {
     g_active = g_constant;  
 
     // Core Motor Real-Time Tick Interrupter (Priority 3)
-    k_thread_create(&infusion_thread, infusion_stack, K_THREAD_STACK_SIZEOF(infusion_stack), 
-                    infusion_tick_fn, nullptr, nullptr, nullptr, 
-                    K_PRIO_PREEMPT(3), 0, K_NO_WAIT);
+    k_timer_init(&tick_timer, tick_timer_handler, nullptr);
+    k_timer_start(&tick_timer, K_USEC(200), K_USEC(200));
 
     // Business Logic Engine (Priority 5)
     k_thread_create(&infusion_run_thread, infusion_run_stack, K_THREAD_STACK_SIZEOF(infusion_run_stack), 
@@ -433,10 +438,8 @@ int main(void) {
         bool     is_running       = g_active->isRunning();
         int32_t  rate_integer     = static_cast<int32_t>(g_constant->getRate());
 
-        // Scale raw hardware counts to matching step units (1:1 with stepper)
         uint32_t relative_encoder_cnt = (g_encoder->getDashboardCount() * 2U) / 3U; 
 
-        // Calculate Tracking Error and Missed Steps safely
         uint32_t error_pct    = 0U;
         uint32_t missed_steps = 0U;
 
@@ -453,7 +456,6 @@ int main(void) {
             error_pct    = 100U;
         }
 
-        // Sequential scrolling monitor output stream frame
         printk("\r\n=============================================================\r\n");
         printk("       INFUSION PUMP EMBEDDED SYSTEM REAL-TIME DASHBOARD      \r\n");
         printk("=============================================================\r\n");

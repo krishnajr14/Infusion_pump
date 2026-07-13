@@ -16,8 +16,9 @@
  * PB7 → SDA
  * I²C address: 0x5C (SA0=GND) or 0x5D (SA0=VDD)
  *
- * LED alarm indicator:
- * PA5 → onboard LD2
+ * Dedicated Hardware Alarm Outputs:
+ * PC7 → External Separate LED Alarm Light
+ * PC6 → External Active Buzzer Alert
  */
 
 &i2c1 {
@@ -25,7 +26,6 @@
     clock-frequency = <I2C_BITRATE_FAST>;
     pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
     pinctrl-names = "default";
-
     lps22hb@5c {
         compatible = "st,lps22hb-press";
         reg = <0x5c>;
@@ -51,11 +51,15 @@
         };
     };
 
-    alarm_leds {
+    alarm_outputs {
         compatible = "gpio-leds";
         alarm_led: alarm_led {
-            gpios = <&gpioa 5 GPIO_ACTIVE_HIGH>;
-            label = "ALARM_LED";
+            gpios = <&gpioc 7 GPIO_ACTIVE_HIGH>;
+            label = "EXTERNAL_ALARM_LED";
+        };
+        alarm_buzzer: alarm_buzzer {
+            gpios = <&gpioc 6 GPIO_ACTIVE_HIGH>;
+            label = "EXTERNAL_ALARM_BUZZER";
         };
     };
 };
@@ -63,7 +67,6 @@
 &timers2 {
     status = "okay";
     st,prescaler = <0>;
-    
     qdec {
         status = "okay";
         pinctrl-0 = <&tim2_ch1_pa0 &tim2_ch2_pa1>;

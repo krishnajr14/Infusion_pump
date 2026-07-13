@@ -31,6 +31,9 @@ void InfusionMode::run() noexcept {
     if (!running_ || complete_) {
         return;
     }
+
+    monitor_.poll();
+
     /* LCOV_EXCL_STOP */
     // Step 1: polymorphic rate computation (overridden per mode)
     float rate = activeMode_->computeTargetRate();
@@ -47,22 +50,33 @@ void InfusionMode::run() noexcept {
 // Counts elapsed time and fires step pulses at the correct interval.
 // Also polls the occlusion monitor and accumulates encoder ticks.
 // ---------------------------------------------------------------------------
+// InfusionMode.cpp — tick(): remove the poll call and pollDivider_ block entirely
+// ---------------------------------------------------------------------------
+// tick() — called every 200 µs from a Zephyr k_timer ISR.
+// Counts elapsed time and fires step pulses at the correct interval.
+// Accumulates encoder ticks into the volume tracker.
+// TEMPORARY: instrumented to diagnose why tracker_.addTicks() isn't
+// producing any visible volume — remove the #ifdef block once resolved.
+// ---------------------------------------------------------------------------
 void InfusionMode::tick() noexcept {
-    /* LCOV_EXCL_START */
     if (!running_ || complete_) {
         return;
     }
-    /* LCOV_EXCL_STOP */
 
-    // Poll pressure sensor every tick
-    monitor_.poll();
-
-    // Accumulate encoder ticks into volume tracker
     const uint32_t newTicks = encoder_.getTicks();
     encoder_.resetTicks();
     tracker_.addTicks(newTicks);
 
-    // Step motor when interval has elapsed
+#ifdef __ZEPHYR__
+    static uint32_t debug_ctr = 0U;
+    if (newTicks > 0U && (++debug_ctr % 50U == 0U)) {
+        // Throttled — this runs from a 200µs ISR, an unthrottled printk
+        // here would reintroduce the exact blocking-in-ISR problem we
+        // already fixed for the pressure sensor.
+        printk("[DBG] newTicks=%u accUL=%u\r\n", newTicks, tracker_.volumeUL());
+    }
+#endif
+
     if (stepIntervalUs_ > 0U) {
         ticksSinceStep_ += TICK_US;
         if (ticksSinceStep_ >= stepIntervalUs_) {
@@ -71,26 +85,20 @@ void InfusionMode::tick() noexcept {
         }
     }
 
-    if (++pollDivider_ >= POLL_EVERY_N_TICKS) {
-        pollDivider_ = 0U;
-        monitor_.poll();
-    }
-
-    // Update ramp progress for LinearRampMode
     activeMode_->advanceTime(TICK_US);
 }
 
 // ---------------------------------------------------------------------------
 void InfusionMode::start() noexcept {
     printk("=== Infusion Pump Started ===\n");
-    running_        = true;
-    complete_       = false;
     ticksSinceStep_ = 0U;
     stepper_.enable();
     stepper_.setDirection(true);
     monitor_.resetBaseline();
     tracker_.reset();
     encoder_.resetTicks();
+    running_        = true;
+    complete_       = false;
 }
 
 void InfusionMode::stop() noexcept {

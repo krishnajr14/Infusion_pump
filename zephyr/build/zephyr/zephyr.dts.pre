@@ -2843,13 +2843,12 @@ arduino_spi: &spi1 {};
 };
 # 0 "<command-line>" 2
 # 1 "/home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/zephyr/boards/nucleo_f446re.overlay" 1
-# 23 "/home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/zephyr/boards/nucleo_f446re.overlay"
+# 24 "/home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/zephyr/boards/nucleo_f446re.overlay"
 &i2c1 {
     status = "okay";
     clock-frequency = <400000>;
     pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
     pinctrl-names = "default";
-
     lps22hb@5c {
         compatible = "st,lps22hb-press";
         reg = <0x5c>;
@@ -2875,11 +2874,15 @@ arduino_spi: &spi1 {};
         };
     };
 
-    alarm_leds {
+    alarm_outputs {
         compatible = "gpio-leds";
         alarm_led: alarm_led {
-            gpios = <&gpioa 5 (0 << 0)>;
-            label = "ALARM_LED";
+            gpios = <&gpioc 7 (0 << 0)>;
+            label = "EXTERNAL_ALARM_LED";
+        };
+        alarm_buzzer: alarm_buzzer {
+            gpios = <&gpioc 6 (0 << 0)>;
+            label = "EXTERNAL_ALARM_BUZZER";
         };
     };
 };
@@ -2887,7 +2890,6 @@ arduino_spi: &spi1 {};
 &timers2 {
     status = "okay";
     st,prescaler = <0>;
-
     qdec {
         status = "okay";
         pinctrl-0 = <&tim2_ch1_pa0 &tim2_ch2_pa1>;

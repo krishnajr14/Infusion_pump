@@ -972,11 +972,15 @@
 			label = "STEPPER_EN";
 		};
 	};
-	alarm_leds {
+	alarm_outputs {
 		compatible = "gpio-leds";
 		alarm_led: alarm_led {
-			gpios = < &gpioa 0x5 0x0 >;
-			label = "ALARM_LED";
+			gpios = < &gpioc 0x7 0x0 >;
+			label = "EXTERNAL_ALARM_LED";
+		};
+		alarm_buzzer: alarm_buzzer {
+			gpios = < &gpioc 0x6 0x0 >;
+			label = "EXTERNAL_ALARM_BUZZER";
 		};
 	};
 };

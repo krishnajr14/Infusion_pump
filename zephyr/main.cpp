@@ -96,6 +96,7 @@ public:
         dashboardOffset_ = 0U;
     }
 
+    // ZephyrEncoderDriver::getTicks(), temporary instrumentation
     uint32_t getTicks() const noexcept override {
         uint32_t current_cnt = TIM2->CNT;
         uint32_t delta = 0U;
@@ -107,6 +108,10 @@ public:
         }
 
         if (delta > 2000000000U) {
+    #ifdef __ZEPHYR__
+            printk("[DBG] wraparound guard tripped: cnt=%u last=%u delta=%u\r\n",
+                current_cnt, lastFetchCnt_, delta);
+    #endif
             return 0U;
         }
 
@@ -268,21 +273,19 @@ static void uart_rx_fn(void* arg, void*, void*) {
 
     while (true) {
         if (uart_poll_in(uart, &byte) == 0 && g_active != nullptr) {
-            
+
             if (byte == '\r' || byte == '\n') {
                 if (g_cmd_idx > 0U) {
-                    g_cmd_buf[g_cmd_idx] = '\0'; 
-
-                    g_encoder->resetTicks();
+                    g_cmd_buf[g_cmd_idx] = '\0';
 
                     if (strncmp(g_cmd_buf, "SET_RATE ", 9) == 0) {
                         int32_t parsed_rate_int = 0;
                         if (sscanf(g_cmd_buf + 9, "%d", &parsed_rate_int) == 1) {
-                            if (parsed_rate_int >= 1 && parsed_rate_int <= 1200) {
+                            if (parsed_rate_int >= 1 && parsed_rate_int <= 500) {
                                 g_constant->setRate(static_cast<float>(parsed_rate_int));
                                 printk("\r\n>> Parameter Confirmed: Rate adjusted to %d mL/hr\r\n", parsed_rate_int);
                             } else {
-                                printk("\r\n>> Safety Guard: Rate must be between 1 and 1200 mL/hr\r\n");
+                                printk("\r\n>> Safety Guard: Rate must be between 1 and 500 mL/hr\r\n");
                             }
                         } else {
                             printk("\r\n>> Parser Error: Invalid rate format. Usage: SET_RATE <integer>\r\n");
@@ -297,50 +300,51 @@ static void uart_rx_fn(void* arg, void*, void*) {
                     }
                     else if (strncmp(g_cmd_buf, "MODE_RAMP", 9) == 0) {
                         if (g_active != g_ramp) {
-                            g_encoder->resetTicks();
                             g_ramp->resetRamp();
                             g_active->switchMode(g_ramp);
                             g_active = g_ramp;
-                            g_encoder->resetTicks();
                             printk("\r\n>> Mode Changed: LINEAR RAMP ACTIVE\r\n");
                         }
                     }
                     else if (strncmp(g_cmd_buf, "START", 5) == 0) {
-                         if (g_active == g_ramp) { g_ramp->resetRamp(); }
+                        if (g_active == g_ramp) { g_ramp->resetRamp(); }
                         g_tracker.reset();
                         g_stepper->resetStepCount();
-                        g_encoder->resetTicks();
-                        g_encoder->resetDashboardCounter(); 
+                        g_encoder->resetTicks();          // the ONE legitimate reset in this whole function
+                        g_encoder->resetDashboardCounter();
                         g_active->start();
                         printk("\r\n>> System State: START applied safely\r\n");
                     }
                     else if (strncmp(g_cmd_buf, "STOP", 4) == 0) {
                         g_active->stop();
-                        g_encoder->resetTicks();
-                        g_encoder->resetDashboardCounter(); 
                         printk("\r\n>> System State: STOP applied safely\r\n");
                     }
                     else if (strncmp(g_cmd_buf, "PAUSE", 5) == 0) {
                         g_active->pause();
-                        g_encoder->resetTicks();
                         printk("\r\n>> System State: PAUSE applied safely\r\n");
                     }
                     else if (strncmp(g_cmd_buf, "RESUME", 6) == 0) {
-                        g_encoder->resetTicks();
                         g_active->resume();
-                        g_encoder->resetTicks();
                         printk("\r\n>> System State: RESUME applied safely\r\n");
+                    }
+                    else if (strncmp(g_cmd_buf, "ALARM_CLEAR", 11) == 0) {
+                        g_monitor->poll();   // force a fresh read right now, don't wait for the next run() cycle
+                        if (g_monitor->isOccluded()) {
+                            printk("\r\n>> Alarm Clear Rejected: Occlusion still present\r\n");
+                        } else {
+                            g_active->resume();
+                            printk("\r\n>> Alarm Cleared: System Resumed\r\n");
+                        }
                     }
                     else {
                         printk("\r\n>> Parser Error: Unknown Command Signature ['%s']\r\n", g_cmd_buf);
                     }
 
-                    g_encoder->resetTicks();
-                    g_cmd_idx = 0U; 
+                    g_cmd_idx = 0U;
                     memset(g_cmd_buf, 0, sizeof(g_cmd_buf));
-                    printk("\r\ninfusion_pump> "); 
+                    printk("\r\ninfusion_pump> ");
                 }
-                continue; 
+                continue;
             }
 
             if (byte >= 32U && byte <= 126U) {
@@ -402,7 +406,7 @@ int main(void) {
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
     auto* bObs = new (buf_buzzerObs) BuzzerAlarmObserver{buzzer_spec}; // Instantiated Buzzer Observer
 
-    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 150U}; 
+    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 50U}; 
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
     g_monitor->registerObserver(bObs); // Registered Buzzer to the notification list
@@ -432,7 +436,7 @@ int main(void) {
     printk("=============================================================\r\n\n");
 
     while (true) {
-        uint32_t current_pressure = pres->readPressureHPa();
+        uint32_t current_pressure = g_monitor->lastPressureHPa();
         uint32_t commanded_steps  = g_stepper->getStepCount();
         uint32_t volume_tracked   = g_tracker.volumeUL();
         bool     is_running       = g_active->isRunning();

@@ -413,7 +413,7 @@ int main(void) {
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
     auto* bObs = new (buf_buzzerObs) BuzzerAlarmObserver{buzzer_spec}; // Instantiated Buzzer Observer
 
-    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 50U}; 
+    g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 30U}; 
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
     g_monitor->registerObserver(bObs); // Registered Buzzer to the notification list

@@ -27,6 +27,7 @@ InfusionMode::InfusionMode(IStepperDriver&   stepper,
 // Order is fixed: compute rate → apply rate → check alarms.
 // ---------------------------------------------------------------------------
 void InfusionMode::run() noexcept {
+    monitor_.poll();
     /* LCOV_EXCL_START */
     if (!running_ || complete_) {
         return;
@@ -59,23 +60,16 @@ void InfusionMode::run() noexcept {
 // producing any visible volume — remove the #ifdef block once resolved.
 // ---------------------------------------------------------------------------
 void InfusionMode::tick() noexcept {
-    if (!running_ || complete_) {
-        return;
-    }
+    if (!running_ || complete_) { return; }
 
     const uint32_t newTicks = encoder_.getTicks();
     encoder_.resetTicks();
-    tracker_.addTicks(newTicks);
 
-#ifdef __ZEPHYR__
-    static uint32_t debug_ctr = 0U;
-    if (newTicks > 0U && (++debug_ctr % 50U == 0U)) {
-        // Throttled — this runs from a 200µs ISR, an unthrottled printk
-        // here would reintroduce the exact blocking-in-ISR problem we
-        // already fixed for the pressure sensor.
-        printk("[DBG] newTicks=%u accUL=%u\r\n", newTicks, tracker_.volumeUL());
+    if (startSettleTicks_ > 0U) {
+        --startSettleTicks_;   // discard encoder readings during settle window, but keep resetting the baseline every cycle
+    } else {
+        tracker_.addTicks(newTicks);
     }
-#endif
 
     if (stepIntervalUs_ > 0U) {
         ticksSinceStep_ += TICK_US;
@@ -91,14 +85,15 @@ void InfusionMode::tick() noexcept {
 // ---------------------------------------------------------------------------
 void InfusionMode::start() noexcept {
     printk("=== Infusion Pump Started ===\n");
-    ticksSinceStep_ = 0U;
+    ticksSinceStep_  = 0U;
+    startSettleTicks_ = START_SETTLE_TICKS;   // arm the settle window
     stepper_.enable();
     stepper_.setDirection(true);
     monitor_.resetBaseline();
     tracker_.reset();
     encoder_.resetTicks();
-    running_        = true;
-    complete_       = false;
+    complete_ = false;
+    running_  = true;
 }
 
 void InfusionMode::stop() noexcept {

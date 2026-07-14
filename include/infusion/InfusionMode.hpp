@@ -87,6 +87,8 @@ private:
     uint32_t ticksSinceStep_{0U};
     uint16_t pollDivider_{0U};
     static constexpr uint16_t POLL_EVERY_N_TICKS = 50U; // 100us tick * 2 * 50 = 10ms cadence
+    uint16_t startSettleTicks_{0U};
+    static constexpr uint16_t START_SETTLE_TICKS = 25U;  // 25 * 200us = 5ms grace window — tune to your actual observed transient duration
 
 
     bool running_{false};

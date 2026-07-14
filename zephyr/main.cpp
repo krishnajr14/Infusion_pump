@@ -97,29 +97,35 @@ public:
     }
 
     // ZephyrEncoderDriver::getTicks(), temporary instrumentation
-    uint32_t getTicks() const noexcept override {
+    uint32_t getTicks() noexcept override {   // no longer const — must mutate remainder state
         uint32_t current_cnt = TIM2->CNT;
         uint32_t delta = 0U;
+        bool isReverse = false;
 
         if (current_cnt >= lastFetchCnt_) {
             delta = current_cnt - lastFetchCnt_;
         } else {
-            delta = (0xFFFFFFFFU - lastFetchCnt_) + current_cnt + 1U;
+            delta = lastFetchCnt_ - current_cnt;
+            isReverse = true;
         }
 
-        if (delta > 2000000000U) {
-    #ifdef __ZEPHYR__
-            printk("[DBG] wraparound guard tripped: cnt=%u last=%u delta=%u\r\n",
-                current_cnt, lastFetchCnt_, delta);
-    #endif
-            return 0U;
+        constexpr uint32_t MAX_PLAUSIBLE_DELTA = 1000U;
+        if (delta > MAX_PLAUSIBLE_DELTA) {
+            return 0U;   // real noise/reversal — correctly discarded, not a truncation loss
         }
 
-        return (delta * 2U) / 3U;
+        // Scale by 2/3 without losing the remainder: accumulate the numerator
+        // across calls instead of dividing away whatever doesn't fit each time.
+        scaledRemainder_ += (delta * 2U);
+        uint32_t wholeTicks = scaledRemainder_ / 3U;
+        scaledRemainder_   %= 3U;
+
+        return wholeTicks;
     }
 
     void resetTicks() noexcept override {
         lastFetchCnt_ = TIM2->CNT;
+        //scaledRemainder_ = 0U; 
     }
 
     void addTicks(uint32_t t) noexcept override {
@@ -142,6 +148,7 @@ public:
 private:
     mutable uint32_t lastFetchCnt_{0U}; 
     uint32_t dashboardOffset_{0U}; 
+    uint32_t scaledRemainder_{0U};
 };
 
 class ZephyrPressureSensor final : public IPressureSensor {

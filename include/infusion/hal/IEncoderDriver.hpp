@@ -20,8 +20,7 @@ public:
     virtual ~IEncoderDriver() = default;  // LCOV_EXCL_LINE
 
     // Returns cumulative tick count since last reset.
-    virtual uint32_t getTicks() const noexcept = 0;
-
+    virtual uint32_t getTicks() noexcept = 0;
     // Reset tick counter to zero.
     virtual void resetTicks() noexcept = 0;
 

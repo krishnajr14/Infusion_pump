@@ -1,38 +1,57 @@
-# Prerequisites
-*.d
+# ==============================================================================
+# Infusion Pump Project - .gitignore
+# ==============================================================================
 
-# Compiled Object files
+# --- System & IDE Specific Files ---
+.DS_Store
+Thumba.db
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# --- Build Directories ---
+# Blocks both native test build and embedded Zephyr build folders
+/build/
+/zephyr/build/
+
+# --- Compilation / Cache Artifacts ---
 *.o
 *.obj
-
-# Static and Dynamic Libraries
 *.a
 *.lib
-*.so
-*.dll
-
-# Executables
-infusion_pump_tests
-*.exe
-*.out
-
-# CMake artifacts
-/build/
-/CMakeFiles/
+*.elf
+*.bin
+*.hex
+*.uf2
+*.map
+*.ninja
+.ninja_*
 CMakeCache.txt
-CTestTestfile.cmake
+CMakeFiles/
+CMakeConfigureLog.yaml
 cmake_install.cmake
+Makefile
+compile_commands.json
 
-# Test Coverage Reports
-*.gcda
-*.gcno
-*.info
-coverage_html/
-coverage_raw.info
+# --- Testing & Code Coverage ---
+/coverage.info
+/coverage_raw.info
+/coverage_html/
+CTestTestfile.cmake
+Testing/
+/infusion_pump_tests
 
-# Local AI Tool / Editor configurations
-.cursorrules
-.cursor/
-.antigravity/
-.ollama/
-.vscode/
+# --- Stray Serial Monitor Log Files ---
+# Safely blocks the terminal artifacts while keeping valid source code
+!**/src/
+!**/include/
+!**/tests/
+!**/zephyr/
+*!-Aacccc*
+*ion_pump>*
+*START===*
+*tem Status]*
+*sed Steps]*
+/ST
+/: no

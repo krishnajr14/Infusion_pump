@@ -472,7 +472,7 @@ int main(void) {
         printk("=============================================================\r\n");
         printk("[System Status] : %s\r\n", is_running ? "RUNNING" : "STOPPED");
         printk("[Target Rate]   : %d mL/hr\r\n", rate_integer);
-        printk("[Coil Pressure] : %u hPa\r\n", current_pressure);
+        printk("[Pressure]      : %u hPa\r\n", current_pressure);
         printk("[Stepper Steps] : %u\r\n", commanded_steps);
         printk("[TIM2 Encoder]  : %u\r\n", relative_encoder_cnt);
         printk("[Missed Steps]  : %u (Err: %u%%)\r\n", missed_steps, error_pct);

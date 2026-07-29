@@ -1,0 +1,1 @@
+genhtml /home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/build-coverage/coverage.info --output-directory /home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/build-coverage/coverage_html --branch-coverage

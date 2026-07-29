@@ -1,0 +1,5 @@
+if(EXISTS "/home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/build-ci/infusion_pump_tests[1]_tests.cmake")
+  include("/home/krishna-inc-5836/Downloads/Task_2/Code/infusion_pump/build-ci/infusion_pump_tests[1]_tests.cmake")
+else()
+  add_test(infusion_pump_tests_NOT_BUILT infusion_pump_tests_NOT_BUILT)
+endif()

@@ -164,3 +164,40 @@ TEST_F(OcclusionMonitorTest, DefaultThreshold_50HPa) {
     m->poll();
     EXPECT_TRUE(m->isOccluded());
 }
+TEST_F(OcclusionMonitorTest, BranchCoverage_HighPressureWhileAlreadyOccluded) {
+    mon->registerObserver(&g_obs1);
+    
+    // 1. Capture normal atmospheric baseline
+    g_sensor.setPressure(1013U);
+    mon->poll(); 
+    
+    // 2. Spike the pressure to trigger the initial occlusion state
+    g_sensor.setPressure(1100U);
+    mon->poll(); 
+    ASSERT_TRUE(mon->isOccluded());
+    
+    // 3. Keep pressure HIGH and poll again!
+    // This forces overThreshold to be true, making !overThreshold false,
+    // satisfying the exact compiler edge case required for full branch coverage.
+    g_sensor.setPressure(1150U);
+    mon->poll();
+    
+    EXPECT_TRUE(mon->isOccluded());
+    EXPECT_EQ(g_obs1.raiseCount(), 1U); // Confirms no duplicate notification hit
+}
+// Targets intermediate loop evaluation counts for observer arrays
+TEST_F(OcclusionMonitorTest, BranchCoverage_IntermediateObserverCount) {
+    // Register exactly ONE observer instead of filling the array
+    mon->registerObserver(&g_obs1); 
+    ASSERT_EQ(mon->observerCount(), 1U);
+    
+    g_sensor.setPressure(1013U);
+    mon->poll();
+    
+    // Spike pressure to trigger loop execution branch matching exactly 1 element
+    g_sensor.setPressure(1100U);
+    mon->poll();
+    
+    EXPECT_TRUE(mon->isOccluded());
+    EXPECT_EQ(g_obs1.raiseCount(), 1U);
+}

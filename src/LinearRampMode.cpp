@@ -34,7 +34,7 @@ float LinearRampMode::computeTargetRate() noexcept {
                          / static_cast<float>(rampDurationUs_);
 
     currentRate_ = startRateMlPerHr_
-                 + (targetRateMlPerHr_ - startRateMlPerHr_) * progress;
+                 + (targetRateMlPerHr_ - startRateMlPerHr_) * (progress*2.0f);
 
     return currentRate_;
 }

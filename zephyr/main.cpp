@@ -1,18 +1,3 @@
-/*
- * main.cpp — Zephyr firmware entry point for Infusion Pump
- *
- * THIS IS THE ONLY FILE THAT INCLUDES ZEPHYR HEADERS.
- * All business logic in include/ and src/ has zero Zephyr dependencies.
- *
- * Hardware: NUCLEO-F446RE 
- * - TMC2209 stepper driver  (STEP/DIR/EN via GPIO)
- * - Quadrature encoder      (TIM2 in encoder mode)
- * - LPS22HB pressure sensor (I²C1)
- * - Separate Alarm LED      (PC7)
- * - Alarm Buzzer            (PC6)
- * - UART console            (USART2 via ST-LINK VCP)
- */
-
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -35,10 +20,6 @@
 #include <stdio.h>   // Required for sscanf
 #include <string.h>  // Required for strncmp, memset
 #include <new>       // Required for placement new
-
-// ============================================================
-// Concrete HAL implementations
-// ============================================================
 
 class ZephyrStepperDriver final : public IStepperDriver {
 public:
@@ -203,7 +184,6 @@ private:
     struct gpio_dt_spec led_;
 };
 
-// PROFESSIONAL ADDITION: Independent Buzzer Alarm Observer Module
 class BuzzerAlarmObserver final : public IAlarmObserver {
 public:
     explicit BuzzerAlarmObserver(const struct gpio_dt_spec buzzer) noexcept
@@ -214,9 +194,6 @@ private:
     struct gpio_dt_spec buzzer_;
 };
 
-// ============================================================
-// Static Storage Area — Zero Heap
-// ============================================================
 static constexpr float    DEFAULT_RATE_ML_HR  = 120.0f;
 static constexpr float    RAMP_START_ML_HR    = 0.0f;
 static constexpr float    RAMP_TARGET_ML_HR   = 120.0f;
@@ -230,7 +207,7 @@ static uint8_t buf_encoder  [sizeof(ZephyrEncoderDriver)]  alignas(ZephyrEncoder
 static uint8_t buf_pressure [sizeof(ZephyrPressureSensor)] alignas(ZephyrPressureSensor);
 static uint8_t buf_uartObs  [sizeof(UartAlarmObserver)]    alignas(UartAlarmObserver);
 static uint8_t buf_ledObs   [sizeof(LedAlarmObserver)]     alignas(LedAlarmObserver);
-static uint8_t buf_buzzerObs[sizeof(BuzzerAlarmObserver)]  alignas(BuzzerAlarmObserver); // Added buffer allocation
+static uint8_t buf_buzzerObs[sizeof(BuzzerAlarmObserver)]  alignas(BuzzerAlarmObserver);
 static uint8_t buf_monitor  [sizeof(OcclusionMonitor)]     alignas(OcclusionMonitor);
 static uint8_t buf_constant [sizeof(ConstantRateMode)]     alignas(ConstantRateMode);
 static uint8_t buf_ramp     [sizeof(LinearRampMode)]       alignas(LinearRampMode);
@@ -398,41 +375,38 @@ int main(void) {
     static const struct gpio_dt_spec dir_spec    = GPIO_DT_SPEC_GET(DT_NODELABEL(dir_pin), gpios);
     static const struct gpio_dt_spec en_spec     = GPIO_DT_SPEC_GET(DT_NODELABEL(en_pin), gpios);
     static const struct gpio_dt_spec led_spec    = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_led), gpios);
-    static const struct gpio_dt_spec buzzer_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_buzzer), gpios); // Added Buzzer spec
+    static const struct gpio_dt_spec buzzer_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(alarm_buzzer), gpios);
 
     gpio_pin_configure_dt(&step_spec,   GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&dir_spec,    GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&en_spec,     GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&led_spec,    GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&buzzer_spec, GPIO_OUTPUT_INACTIVE); // Configured Buzzer pin
+    gpio_pin_configure_dt(&buzzer_spec, GPIO_OUTPUT_INACTIVE);
 
     g_stepper  = new (buf_stepper)  ZephyrStepperDriver{step_spec, dir_spec, en_spec};
     g_encoder  = new (buf_encoder)  ZephyrEncoderDriver{};
     auto* pres = new (buf_pressure) ZephyrPressureSensor{lps22hb};
     auto* uObs = new (buf_uartObs)  UartAlarmObserver{uart};
     auto* lObs = new (buf_ledObs)   LedAlarmObserver{led_spec};
-    auto* bObs = new (buf_buzzerObs) BuzzerAlarmObserver{buzzer_spec}; // Instantiated Buzzer Observer
+    auto* bObs = new (buf_buzzerObs) BuzzerAlarmObserver{buzzer_spec};
 
     g_monitor  = new (buf_monitor)  OcclusionMonitor{*pres, 30U}; 
     g_monitor->registerObserver(uObs);
     g_monitor->registerObserver(lObs);
-    g_monitor->registerObserver(bObs); // Registered Buzzer to the notification list
+    g_monitor->registerObserver(bObs);
 
     g_constant = new (buf_constant) ConstantRateMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, DEFAULT_RATE_ML_HR};
     g_ramp     = new (buf_ramp)     LinearRampMode{*g_stepper, *g_encoder, g_tracker, *g_monitor, TARGET_VOLUME_UL, RAMP_START_ML_HR, RAMP_TARGET_ML_HR, RAMP_DURATION_US};
 
     g_active = g_constant;  
 
-    // Core Motor Real-Time Tick Interrupter (Priority 3)
     k_timer_init(&tick_timer, tick_timer_handler, nullptr);
     k_timer_start(&tick_timer, K_USEC(200), K_USEC(200));
 
-    // Business Logic Engine (Priority 5)
     k_thread_create(&infusion_run_thread, infusion_run_stack, K_THREAD_STACK_SIZEOF(infusion_run_stack), 
                     infusion_run_fn, nullptr, nullptr, nullptr, 
                     K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
 
-    // Shell CLI Input Monitor (Priority 7)
     k_thread_create(&uart_thread, uart_stack, K_THREAD_STACK_SIZEOF(uart_stack), 
                     uart_rx_fn, const_cast<struct device*>(uart), nullptr, nullptr, 
                     K_PRIO_PREEMPT(7), 0, K_NO_WAIT);

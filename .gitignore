@@ -1,21 +1,23 @@
-# ==============================================================================
-# Infusion Pump Project - .gitignore
-# ==============================================================================
-
-# --- System & IDE Specific Files ---
-.DS_Store
-Thumba.db
-.vscode/
-.idea/
-*.swp
-*.bak
-
-# --- Build Directories ---
-# Blocks both native test build and embedded Zephyr build folders
+# CMake host-test and coverage build directories
 /build/
-/zephyr/build/
+/build-*/
 
-# --- Compilation / Cache Artifacts ---
+# Zephyr build products
+/zephyr/build/
+/zephyr/build-*/
+
+# CMake-generated files (including ad-hoc out-of-source builds)
+CMakeCache.txt
+CMakeFiles/
+CMakeConfigureLog.yaml
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+*.ninja
+.ninja_*
+
+# Compiled binaries and coverage data
 *.o
 *.obj
 *.a
@@ -25,33 +27,17 @@ Thumba.db
 *.hex
 *.uf2
 *.map
-*.ninja
-.ninja_*
-CMakeCache.txt
-CMakeFiles/
-CMakeConfigureLog.yaml
-cmake_install.cmake
-Makefile
-compile_commands.json
+*.gcda
+*.gcno
+*.gcov
+*.info
+coverage_html/
 
-# --- Testing & Code Coverage ---
-/coverage.info
-/coverage_raw.info
-/coverage_html/
-CTestTestfile.cmake
-Testing/
-/infusion_pump_tests
-
-# --- Stray Serial Monitor Log Files ---
-# Safely blocks the terminal artifacts while keeping valid source code
-!**/src/
-!**/include/
-!**/tests/
-!**/zephyr/
-*!-Aacccc*
-*ion_pump>*
-*START===*
-*tem Status]*
-*sed Steps]*
-/ST
-/: no
+# IDE, editor, and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+.DS_Store
+Thumbs.db
